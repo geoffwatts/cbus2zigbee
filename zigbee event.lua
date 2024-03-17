@@ -13,24 +13,24 @@ zPort = 0xBEEF1
 
 -- Define the Zigbee address for each group we want to send
 local addresses = {
-    ["0/56/200"] = "0xa4c1389bf2e3ae50",
+    ["0/56/100"] = "0xa4c1389bf2e3ae50",
 }
 
 server = require('socket').udp()
 
 -- Get Zigbee address for the group from local addresses or tags
-function getZigbeeAddress(group)
-    local local_address = addresses[group]
+function getZigbeeAddress(addr,dst)
+    local local_address = addresses[dst]
     if local_address then
-        log("Using local address for group "..group..": "..local_address)
+        log("Using local address for group "..dst..": "..local_address)
         return local_address
     end
 
-    local tags = db:getall("SELECT ot.tag FROM objects AS o JOIN objecttags AS ot ON o.id=ot.object WHERE o.id="..group.." AND ot.tag like 'z=%'")
+    local tags = db:getall("SELECT ot.tag FROM objects AS o JOIN objecttags AS ot ON o.id=ot.object WHERE o.id="..addr.." AND ot.tag like 'z=%'")
     if tags and #tags > 0 then
-        local zigbee_address = string.match(tags[1]["tag"], 'z=(%x+)')
+        local zigbee_address = string.split(tags[1]["tag"],"=")[2]
         if zigbee_address then
-            log("Zigbee address found for group "..group..": "..zigbee_address)
+            log("Zigbee address found for group "..dst..": "..zigbee_address)
             return zigbee_address
         end
     end
@@ -47,7 +47,7 @@ app = tonumber(parts[2])
 group = tonumber(parts[3])
 ramp = GetCBusRampRate(net, app, group)
 
-zigbee_address = getZigbeeAddress(event.dstraw)
+zigbee_address = getZigbeeAddress(event.dstraw,event.dst)
 
 if not zigbee_address then
     log("Keyword triggered but don't have a Zigbee address for "..event.dst.." - please update the table in the ZIGBEE script or add a z= tag to the group")
