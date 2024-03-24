@@ -47,7 +47,7 @@ Check for presence of the event script
 local eventScripts = db:getall("SELECT name FROM scripting WHERE type = 'event'")
 found = false
 for _, s in ipairs(eventScripts) do
-  if s.name:lower() == eventName then found = true eventName = s.name end
+  if s.name:lower() == eventName:lower() then found = true eventName = s.name end
 end
 if not found then
   log('Error: Event-based script \''..eventName..'\' not found. Halting')
