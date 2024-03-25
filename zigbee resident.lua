@@ -10,7 +10,7 @@ mqtt_broker = '192.168.1.1'
 mqtt_username = ''
 mqtt_password = ''
 mqtt_clientid = 'cbus2zigbee'
-eventName = 'zigbee' -- The name of the ZigBee event script
+eventName = 'zigbee' -- The name of the Zigbee event script
 local checkChanges = nil -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 
@@ -185,7 +185,7 @@ local function cudZig()
         
         zigbee[alias] = { name=v.name, address=_L.z, net=v.net, app=v.app, group=v.group, keywords=curr, }
       else
-        log('Error: Invalid or no z= hexadecimal address specified for ZigBee object '..alias)
+        log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
         zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
       end
       zigbeeFriendly[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
@@ -195,16 +195,16 @@ local function cudZig()
   -- Handle deletions
   for k, v in pairs(zigbee) do
     if not found[k] then
-      log('Removing '..k..' ZigBee '..v.name) zigbeeFriendly[k.address] = nil zigbee[k] = nil remCount = remCount + 1
+      log('Removing '..k..' Zigbee '..v.name) zigbeeFriendly[k.address] = nil zigbee[k] = nil remCount = remCount + 1
     end
   end
   if remCount > 0 then
-    log('Removed '..remCount..' ZigBee object'..(remCount ~= 1 and 's' or '')..', event script \''..eventName..'\' restarted')
+    log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or '')..', event script \''..eventName..'\' restarted')
   end
   -- Handle additions/modifications
   if addition or modification then
-    if addition then log('Added '..addCount..' ZigBee object'..(addCount ~= 1 and 's' or '')..(addCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-    if modification then log('Modified '..modCount..' ZigBee object'..(modCount ~= 1 and 's' or '')..(modCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
+    if addition then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')..(addCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
+    if modification then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')..(modCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
   end
   if addCount > 0 or modCount > 0 or remCount > 0 then
     script.disable(eventName) script.enable(eventName) -- Ensure that newly changed keyworded groups send updates
