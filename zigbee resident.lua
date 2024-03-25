@@ -11,7 +11,8 @@ mqtt_username = ''
 mqtt_password = ''
 mqtt_clientid = 'cbus2zigbee'
 eventName = 'zigbee' -- The name of the ZigBee event script
-local checkChanges = 5 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
+local checkChanges = nil -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
+local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 
 local logging = true
 
@@ -20,13 +21,20 @@ local mqttTimeout = 0
 
 local zPort = 0xBEEF1
 local mqttTopic = "zigbee2mqtt/"
-local mqttStatus = 2
+local mqttStatus = 2 -- initially disconnected from broker
+local init = true -- mqtt initialise
+local reconnect = false -- reconnecting to broker
 local QoS = 2 -- send exactly once
 local zigbee = {}
+local zigbeeFriendly = {}
+local zigbeeDevices = {}
+local zigbeeGroups = {}
 local cbusMessages = {} -- message queue
 local mqttMessages = {} -- message queue
+local ignoreMqtt = {} -- when sending from C-Bus to MQTT any status update for C-Bus will be ignored
+local ignoreCbus = {} -- when receiving from MQTT to C-Bus any status update for MQTT will be ignored
 
-local cudRaw = { -- All possible keywords for ZIGBEE objects, used in CUD function to exclude unrelated keywords for change detection
+local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
   'ZIGBEE', 'z=',
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
@@ -39,6 +47,8 @@ local function removeIrrelevant(keywords)
   end
   return table.concat(curr, ',')
 end
+
+local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether any table members
 
 
 --[[
@@ -56,7 +66,7 @@ end
 
 
 --[[
-Create new mqtt client and callbacks
+Create Mosquitto client and callbacks
 --]]
 local client = require("mosquitto").new(mqttClientId)
 if mqttUsername and mqttUsername ~= '' then client:login_set(mqttUsername, mqttPassword) end
@@ -70,10 +80,13 @@ end
 
 client.ON_DISCONNECT = function()
   log("Mosquitto broker disconnected - attempting recovery and client reconnect")
+  mqttStatus = 2
+  init = true
+  reconnect = true
 end
 
 client.ON_MESSAGE = function(mid, topic, payload)
-  mqttMessages[#mqttMessages + 1] = { topic=topic, payload=payload } -- Queue the message
+  mqttMessages[#mqttMessages + 1] = { topic=topic, payload=json.decode(payload) } -- Queue the message
 end
 
 
@@ -170,18 +183,19 @@ local function cudZig()
       if _L.z:find('^0[xX]%x*$') then
         if not modification then addition = true addCount = addCount + 1 else modCount = modCount + 1 end
         
-        zigbee[alias] = {name=v.name, address=_L.z, net=v.net, app=v.app, group=v.group, keywords=curr, }
+        zigbee[alias] = { name=v.name, address=_L.z, net=v.net, app=v.app, group=v.group, keywords=curr, }
       else
         log('Error: Invalid or no z= hexadecimal address specified for ZigBee object '..alias)
-        zigbee[alias] = {name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
+        zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
       end
+      zigbeeFriendly[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
     end
   end
 
   -- Handle deletions
   for k, v in pairs(zigbee) do
     if not found[k] then
-      log('Removing '..k..' ZigBee '..v.name) zigbee[k] = nil remCount = remCount + 1
+      log('Removing '..k..' ZigBee '..v.name) zigbeeFriendly[k.address] = nil zigbee[k] = nil remCount = remCount + 1
     end
   end
   if remCount > 0 then
@@ -202,11 +216,18 @@ end
 Publish to MQTT
 --]]
 function publish(alias, level)
+  if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
+    local max = zigbeeDevices[zigbee[alias].address].max
+    if max ~= nil then
+      if level > max then level = max end
+    end
+  end
   local msg = {
     brightness = level,
     state = (level ~= 0) and "ON" or "OFF",
   }
-  client:publish(mqttTopic..zigbee[alias].address..'/set', json.encode(msg), QoS, true)
+  ignoreMqtt[alias] = true
+  client:publish(mqttTopic..zigbee[alias].address..'/set', json.encode(msg), QoS, false)
 end
 
 
@@ -226,13 +247,90 @@ Receive commands from C-Bus and publish to MQTT
 --]]
 function outstandingCbusMessage()
   for _, cmd in ipairs(cbusMessages) do
-    parts = string.split(cmd, "/")
+    parts = cmd:split('/')
     alias = parts[1]..'/'..parts[2]..'/'..parts[3]
+    if ignoreCbus[alias] then goto next end
     local level = tonumber(parts[4])
     local ramp = tonumber(parts[5]) -- Ignoring ramp for now
     publish(alias, level)
+    ::next::
   end
   cbusMessages = {}
+end
+
+
+--[[
+Available devices has changed, untested
+--]]
+function updateDevices(payload)
+  local d, e, f
+  local found = {}
+  local kill = {}
+  for _, d in ipairs(payload) do
+    found[d.ieee_address] = true
+    if zigbeeDevices[d.ieee_address] == nil then
+      zigbeeDevices[d.ieee_address] = {}
+      if logging then log('Found a new device '..d.ieee_address) end
+    end
+    zigbeeDevices[d.ieee_address].friendly = d.friendly_name
+    if d.definition and d.definition.exposes then
+      for _, e in d.definition.exposes do
+        if e.type == 'light' then
+          if e.features then
+            for f in e.features do
+              if f.name == 'brightness' then
+                zigbeeDevices[d.ieee_address].max = value_max
+              end
+            end
+          end
+        elseif e.type == 'numeric' then
+          if zigbeeDevices[d.ieee_address].exposes == nil then zigbeeDevices[d.ieee_address].exposes = {} end
+          zigbeeDevices[d.ieee_address].exposes[e.name] = true
+        end
+      end
+    end
+  end
+  for d, _ in pairs(zigbeeDevices) do if not found[d] then kill[d] = true if logging then log('Removed a device '..d) end end end
+  for d, _ in pairs(kill) do zigbeeDevices[d] = nil end
+end
+
+
+--[[
+Available groups has changed
+--]]
+function updateGroups(payload)
+end
+
+
+--[[
+A device has updated status, so send to C-Bus, untested
+--]]
+function statusUpdate(friendly, payload)
+  if not zigbeeFriendly[friendly] then return end
+
+  local net = zigbeeFriendly[friendly].net
+  local app = zigbeeFriendly[friendly].app
+  local group = zigbeeFriendly[friendly].group
+
+  if app == 250 then -- User parameter
+    -- Sensors are somewhat complicated. Need to pull the available json and expose as sensor= keywords...
+  elseif lighting[tostring(app)] then -- Lighting
+    if payload.brightness then
+      ignoreCbus[zigbeeFriendly[friendly].alias] = true
+      if payload.state == 'ON' then
+        local level = payload.brightness
+        if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
+          local max = zigbeeDevices[zigbee[alias].address].max
+          if max ~= nil then
+            if level == max then level = 255 end
+          end
+        end
+        SetCBusLevel(net, app, group, level, 0)
+      else
+        SetCBusLevel(net, app, group, 0, 0)
+      end
+    end
+  end
 end
 
 
@@ -240,17 +338,23 @@ end
 Send commands subscribed from MQTT to C-Bus
 --]]
 function outstandingMqttMessage()
-  for _, cmd in ipairs(mqttMessages) do
-    
+  for _, msg in ipairs(mqttMessages) do
+    parts = msg.topic:split('/')
+    if parts[2] == 'bridge' then
+      if parts[3] == 'devices' then updateDevices(msg.payload)
+      elseif parts[3] == 'groups' then updateGroups(msg.payload)
+      end
+    else
+      if parts[3] == nil then if not ignoreMqtt[zigbeeFriendly[parts[2]]] then statusUpdate(parts[2], msg.payload) else ignoreMqtt[zigbeeFriendly[parts[2]]] = nil end end
+    end
   end
   mqttMessages = {}
 end
 
+    
 -- Reconnect variables
 local warningTimeout = 30
 local timeout = 1
-local init = true
-local reconnect = false
 local timeoutStart, connectStart, mqttConnected
 
 local changesChecked = socket.gettime()
