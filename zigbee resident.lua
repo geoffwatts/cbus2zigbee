@@ -11,7 +11,7 @@ mqtt_username = ''
 mqtt_password = ''
 mqtt_clientid = 'cbus2zigbee'
 eventName = 'zigbee' -- The name of the Zigbee event script
-local checkChanges = nil -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
+local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 
 local logging = true
@@ -35,7 +35,7 @@ local ignoreMqtt = {} -- when sending from C-Bus to MQTT any status update for C
 local ignoreCbus = {} -- when receiving from MQTT to C-Bus any status update for MQTT will be ignored
 
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
-  'ZIGBEE', 'z=',
+  'ZIGBEE', 'z=', 'sensor=', 
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
@@ -163,27 +163,26 @@ Create / update / delete ZIGBEE devices
 local function cudZig()
   local grps = getGroups('ZIGBEE')
   local found = {}
-  local addition = false
-  local modification = false
   local addCount = 0
   local modCount = 0
   local remCount = 0
   local alias, k, v
 
   for alias, v in pairs(grps) do
+    local modification = false
     found[alias] = true
     local curr = removeIrrelevant(v.keywords)
-
     if zigbee[alias] and zigbee[alias].keywords ~= curr then modification = true end
     if not zigbee[alias] or modification then
       local _L = {
         z = '',
+        sensor = '',
       }
       getKeyValue(alias, v.tags, _L)
       if _L.z:find('^0[xX]%x*$') then
-        if not modification then addition = true addCount = addCount + 1 else modCount = modCount + 1 end
-        
-        zigbee[alias] = { name=v.name, address=_L.z, net=v.net, app=v.app, group=v.group, keywords=curr, }
+        if not modification then addCount = addCount + 1 else modCount = modCount + 1 end
+        if _L.sensor == '' then _L.sensor = nil end
+        zigbee[alias] = { name=v.name, address=_L.z, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
         zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
@@ -201,11 +200,9 @@ local function cudZig()
   if remCount > 0 then
     log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or '')..', event script \''..eventName..'\' restarted')
   end
-  -- Handle additions/modifications
-  if addition or modification then
-    if addition then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')..(addCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-    if modification then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')..(modCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-  end
+  -- Log it, and restart scripts if appropriate
+  if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')..(addCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
+  if modCount > 0 then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')..(modCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
   if addCount > 0 or modCount > 0 or remCount > 0 then
     script.disable(eventName) script.enable(eventName) -- Ensure that newly changed keyworded groups send updates
   end
@@ -270,7 +267,7 @@ function updateDevices(payload)
     found[d.ieee_address] = true
     if zigbeeDevices[d.ieee_address] == nil then
       zigbeeDevices[d.ieee_address] = {}
-      if logging then log('Found a new device '..d.ieee_address) end
+      if logging then log('Found a device '..d.ieee_address) end
     end
     zigbeeDevices[d.ieee_address].friendly = d.friendly_name
     if d.definition and d.definition.exposes then
@@ -313,7 +310,7 @@ function statusUpdate(friendly, payload)
   local group = zigbeeFriendly[friendly].group
 
   if app == 250 then -- User parameter
-    -- Sensors are somewhat complicated. Need to pull the available json and expose as sensor= keywords...
+    -- Sensors are somewhat complicated. Need to pull the available json exposes and tie to sensor= keywords...
   elseif lighting[tostring(app)] then -- Lighting
     if payload.brightness then
       ignoreCbus[zigbeeFriendly[friendly].alias] = true
