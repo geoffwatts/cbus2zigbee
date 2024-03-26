@@ -25,8 +25,9 @@ local mqttStatus = 2 -- initially disconnected from broker
 local init = true -- mqtt initialise
 local reconnect = false -- reconnecting to broker
 local QoS = 2 -- send exactly once
+local subscribed = {}
 local zigbee = {}
-local zigbeeFriendly = {}
+local zigbeeAddress = {}
 local zigbeeDevices = {}
 local zigbeeGroups = {}
 local cbusMessages = {} -- message queue
@@ -106,6 +107,7 @@ local function getGroups(kw)
   local t
   local grps = {}
   for _, t in ipairs(db:getall("SELECT o.address, o.tagcache, o.name FROM objects AS o JOIN objecttags AS ot ON o.id=ot.object WHERE ot.tag='"..kw.."'")) do
+    if t.tagcache == nil then goto skip end
     local alias = knxlib.decodega(t.address)
     local parts = load("return {"..alias:gsub('/',',').."}")()
     grps[alias] = { tags = {}, name = t.name, keywords = t.tagcache:gsub(', ',','), net = parts[1], app = parts[2], group = parts[3], channel = parts[4], }
@@ -120,6 +122,7 @@ local function getGroups(kw)
       if parts[2] then tags[parts[1]:trim()] = parts[2]:trim() else tags[parts[1]:trim()] = -1 end
     end
     grps[alias].tags = tags
+    ::skip::
   end
   return grps
 end
@@ -179,22 +182,43 @@ local function cudZig()
         sensor = '',
       }
       getKeyValue(alias, v.tags, _L)
+      local key = _L.z
       if _L.z:find('^0[xX]%x*$') then
         if not modification then addCount = addCount + 1 else modCount = modCount + 1 end
-        if _L.sensor == '' then _L.sensor = nil end
-        zigbee[alias] = { name=v.name, address=_L.z, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
+        local address = _L.z
+        if _L.sensor == '' then
+          _L.sensor = nil
+        else
+          if zigbeeDevices[_L.z].exposes[_L.sensor] == nil then
+            log('Keyword error, device '.._L.z..' has no '.._L.sensor..' exposed')
+            _L.sensor = nil
+            if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
+          end
+          if not zigbeeDevices[_L.z].sensor then
+            zigbeeDevices[_L.z].sensor = { { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, }, }
+          else
+            table.insert(zigbeeDevices[_L.z].sensor, { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, })
+          end
+        end
+        zigbee[alias] = { name=v.name, address=address, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
+        if not subscribed[address] then
+          client:subscribe(mqttTopic..address, mqttQoS)
+          subscribed[address] = true
+        end
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
         zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
       end
-      zigbeeFriendly[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
+      zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
     end
   end
 
   -- Handle deletions
   for k, v in pairs(zigbee) do
     if not found[k] then
-      log('Removing '..k..' Zigbee '..v.name) zigbeeFriendly[k.address] = nil zigbee[k] = nil remCount = remCount + 1
+      log('Removing '..k..' Zigbee '..v.name) zigbeeAddress[k.address] = nil zigbee[k] = nil remCount = remCount + 1
+      client:unsubscribe(mqttTopic..address)
+      subscribed[address] = nil
     end
   end
   if remCount > 0 then
@@ -213,6 +237,7 @@ end
 Publish to MQTT
 --]]
 function publish(alias, level)
+  if zigbee[alias].sensor then return end
   if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
     local max = zigbeeDevices[zigbee[alias].address].max
     if max ~= nil then
@@ -264,16 +289,17 @@ function updateDevices(payload)
   local found = {}
   local kill = {}
   for _, d in ipairs(payload) do
+    if d.friendly_name and type(d.friendly_name) ~= 'userdata' and d.friendly_name == 'Coordinator' then goto skip end
     found[d.ieee_address] = true
     if zigbeeDevices[d.ieee_address] == nil then
       zigbeeDevices[d.ieee_address] = {}
-      if logging then log('Found a device '..d.ieee_address) end
+      if logging then log('Found a device '..d.ieee_address..(d.friendly_name ~= nil and ', '..d.friendly_name or '')) end
     end
     zigbeeDevices[d.ieee_address].friendly = d.friendly_name
-    if d.definition and d.definition.exposes then
-      for _, e in d.definition.exposes do
+    if type(d.definition) ~= 'userdata' and d.definition.exposes then
+      for _, e in pairs(d.definition.exposes) do
         if e.type == 'light' then
-          if e.features then
+          if e.features and type(d.features) ~= 'userdata' then
             for f in e.features do
               if f.name == 'brightness' then
                 zigbeeDevices[d.ieee_address].max = value_max
@@ -286,6 +312,7 @@ function updateDevices(payload)
         end
       end
     end
+    ::skip::
   end
   for d, _ in pairs(zigbeeDevices) do if not found[d] then kill[d] = true if logging then log('Removed a device '..d) end end end
   for d, _ in pairs(kill) do zigbeeDevices[d] = nil end
@@ -303,17 +330,31 @@ end
 A device has updated status, so send to C-Bus, untested
 --]]
 function statusUpdate(friendly, payload)
-  if not zigbeeFriendly[friendly] then return end
+  if zigbeeDevices[friendly].sensor then
+    local s
+    for _, s in ipairs(zigbeeDevices[friendly].sensor) do
+      local value = payload[s.expose]
+      if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
+      if value then
+        ignoreCbus[s.alias] = true
+        if lighting[tostring(s.app)] then -- Lighting group sensor
+          SetCBusLevel(s.net, s.app, s.group, value, 0)
+        elseif s.app == 250 then -- User param
+          SetUserParam(s.net, s.group, value)
+        end
+      else
+        log('Error: Nil value for sensor '..salias)
+      end
+    end
+  else
+    if not zigbeeAddress[friendly] then return end
 
-  local net = zigbeeFriendly[friendly].net
-  local app = zigbeeFriendly[friendly].app
-  local group = zigbeeFriendly[friendly].group
+    local net = zigbeeAddress[friendly].net
+    local app = zigbeeAddress[friendly].app
+    local group = zigbeeAddress[friendly].group
+    local alias = zigbeeAddress[friendly].alias
 
-  if app == 250 then -- User parameter
-    -- Sensors are somewhat complicated. Need to pull the available json exposes and tie to sensor= keywords...
-  elseif lighting[tostring(app)] then -- Lighting
     if payload.brightness then
-      ignoreCbus[zigbeeFriendly[friendly].alias] = true
       if payload.state == 'ON' then
         local level = payload.brightness
         if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
@@ -322,8 +363,12 @@ function statusUpdate(friendly, payload)
             if level == max then level = 255 end
           end
         end
+        ignoreCbus[alias] = true
+        if logging then log('Set '..alias..' to '..level) end
         SetCBusLevel(net, app, group, level, 0)
       else
+        ignoreCbus[alias] = true
+        if logging then log('Set '..alias..' to OFF') end
         SetCBusLevel(net, app, group, 0, 0)
       end
     end
@@ -342,7 +387,7 @@ function outstandingMqttMessage()
       elseif parts[3] == 'groups' then updateGroups(msg.payload)
       end
     else
-      if parts[3] == nil then if not ignoreMqtt[zigbeeFriendly[parts[2]]] then statusUpdate(parts[2], msg.payload) else ignoreMqtt[zigbeeFriendly[parts[2]]] = nil end end
+      if parts[3] == nil then if not ignoreMqtt[zigbeeAddress[parts[2]]] then statusUpdate(parts[2], msg.payload) else ignoreMqtt[zigbeeAddress[parts[2]]] = nil end end
     end
   end
   mqttMessages = {}
@@ -364,7 +409,7 @@ while true do
   stat, err = pcall(function ()
     ::checkAgain::
     local cmd = nil
-	  cmd = server:receive()
+    cmd = server:receive()
     if cmd and type(cmd) == 'string' then
       cbusMessages[#cbusMessages + 1] = cmd -- Queue the new message
       server:settimeout(0); more = true; goto checkAgain -- Immediately check for more buffered inbound messages to queue
@@ -416,11 +461,18 @@ while true do
     end
     mqttConnected = socket.gettime()
     -- Subscribe to relevant topics
-    client:subscribe(mqttTopic..'#', mqttQoS)
+    client:subscribe(mqttTopic..'bridge/#', mqttQoS)
     -- Connected... Now loop briefly to allow retained value retrieval for subscribed topics because synchronous
-    while socket.gettime() - mqttConnected < 0.5 do client:loop(0) end
+    while socket.gettime() - mqttConnected < 1 do
+      client:loop(0)
+      if #mqttMessages > 0 then
+        -- Send outstanding messages to CBus
+        stat, err = pcall(outstandingMqttMessage)
+        if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
+      end
+    end
     if not reconnect then -- Full publish topics
-      stat, err = pcall(cudZig) if not stat then log(err) log('Halting') while true do socket.select(nil, nil, 1) end end
+      stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
       stat, err = pcall(publishCurrent) if not stat then log('Error publishing current values: '..err) end -- Log and continue
     end
   else
@@ -432,7 +484,7 @@ while true do
   local t = socket.gettime()
   if checkChanges and t > changesChecked then
     changesChecked = t
-    stat, err = pcall(cudZig) if not stat then log(err) log('Halting') while true do socket.select(nil, nil, 1) end end
+    stat, err = pcall(cudZig) if not stat then log('Error publishing current values: '..err) end
   end
 
   ::next::
