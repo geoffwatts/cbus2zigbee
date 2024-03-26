@@ -463,7 +463,7 @@ while true do
     -- Subscribe to relevant topics
     client:subscribe(mqttTopic..'bridge/#', mqttQoS)
     -- Connected... Now loop briefly to allow retained value retrieval for subscribed topics because synchronous
-    while socket.gettime() - mqttConnected < 1 do
+    while socket.gettime() - mqttConnected < 0.5 do
       client:loop(0)
       if #mqttMessages > 0 then
         -- Send outstanding messages to CBus
@@ -474,6 +474,12 @@ while true do
     if not reconnect then -- Full publish topics
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
       stat, err = pcall(publishCurrent) if not stat then log('Error publishing current values: '..err) end -- Log and continue
+    else -- Resubscribe
+      local address
+      for address, _ in pairs(subscribed) do
+        ignoreMqtt[zigbeeAddress[address]] = true
+        client:subscribe(mqttTopic..address, mqttQoS)
+      end
     end
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
