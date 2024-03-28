@@ -216,10 +216,12 @@ local function cudZig()
           end
         end
         zigbee[alias] = { name=v.name, address=address, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
-        if not subscribed[address] then
-          client:subscribe(mqttTopic..address, mqttQoS)
-          subscribed[address] = true
-          if logging then log('Subscribed '..mqttTopic..address) end
+        local friendly = zigbeeDevices[address].friendly
+        if not subscribed[friendly] then
+          ignoreMqtt[alias] = true
+          client:subscribe(mqttTopic..friendly, mqttQoS)
+          subscribed[friendly] = true
+          if logging then log('Subscribed '..mqttTopic..friendly) end
         end
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
@@ -233,9 +235,13 @@ local function cudZig()
   -- Handle deletions
   for k, v in pairs(zigbee) do
     if not found[k] then
-      log('Removing '..k..' Zigbee '..v.name) zigbeeAddress[k.address] = nil zigbee[k] = nil remCount = remCount + 1
-      client:unsubscribe(mqttTopic..address)
-      subscribed[address] = nil
+      local name = v.name
+      local address = k.address
+      if name ~= nil and address ~= nil then log('Removing '..k..' Zigbee '..v.name) zigbeeAddress[address] = nil zigbee[k] = nil remCount = remCount + 1 end
+      if address ~= nil then
+        client:unsubscribe(mqttTopic..address)
+        subscribed[address] = nil
+      end
     end
   end
   if remCount > 0 then
@@ -267,8 +273,8 @@ function publish(alias, level)
     state = (level ~= 0) and "ON" or "OFF",
   }
   ignoreMqtt[alias] = true
-  local topic = mqttTopic..zigbee[alias].address..'/set'
-  if logging then log('Publish '..topic..', '..json.encode(msg)) end
+  local topic = mqttTopic..zigbeeDevices[zigbee[alias].address].friendly..'/set'
+  if logging then log('Publish '..alias..' '..topic..', '..json.encode(msg)) end
   client:publish(topic, json.encode(msg), QoS, false)
 end
 
@@ -305,19 +311,22 @@ end
 Available devices has changed, untested
 --]]
 function updateDevices(payload)
-  local d, e, f
+  local d, e, f, new, modified
   local found = {}
   local kill = {}
   for _, d in ipairs(payload) do
+    new = false
+    modified = false
     local friendly = nil if d.friendly_name and type(d.friendly_name) ~= 'userdata' then friendly = d.friendly_name end
 
     if friendly == 'Coordinator' then goto skip end
     found[d.ieee_address] = true
     if zigbeeDevices[d.ieee_address] == nil then
+      new = true
       zigbeeDevices[d.ieee_address] = {}
-      if logging then log('Found a device '..d.ieee_address..(d.friendly_name ~= nil and ', '..d.friendly_name or '')) end
+      if logging then log('Found a device '..d.ieee_address..(d.friendly_name ~= nil and ' (friendly name: '..d.friendly_name..')' or '')) end
     end
-    zigbeeDevices[d.ieee_address].friendly = friendly
+    if zigbeeDevices[d.ieee_address].friendly ~= friendly then zigbeeDevices[d.ieee_address].friendly = friendly modified = true end
     zigbeeName[friendly] = d.ieee_address
     if type(d.definition) ~= 'userdata' and d.definition.exposes then
       for _, e in pairs(d.definition.exposes) do
@@ -333,6 +342,9 @@ function updateDevices(payload)
           if zigbeeDevices[d.ieee_address].exposes == nil then zigbeeDevices[d.ieee_address].exposes = {} end
           zigbeeDevices[d.ieee_address].exposes[e.name] = true
         end
+      end
+      if not new and modified then
+        if logging then log('Update for a device '..d.ieee_address..(d.friendly_name ~= nil and ', '..d.friendly_name or '')) end
       end
     end
     ::skip::
@@ -353,10 +365,12 @@ end
 A device has updated status, so send to C-Bus, untested
 --]]
 function statusUpdate(friendly, payload)
-  if not zigbeeDevices[friendly] then return end
-  if zigbeeDevices[friendly].sensor then
+  local device
+  if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
+  if not device then return end
+  if device.sensor then
     local s
-    for _, s in ipairs(zigbeeDevices[friendly].sensor) do
+    for _, s in ipairs(device.sensor) do
       local value = payload[s.expose]
       if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
       if value then
@@ -371,19 +385,17 @@ function statusUpdate(friendly, payload)
       end
     end
   else
-    local net = zigbeeAddress[friendly].net
-    local app = zigbeeAddress[friendly].app
-    local group = zigbeeAddress[friendly].group
-    local alias = zigbeeAddress[friendly].alias
+    local net = zigbeeAddress[zigbeeName[friendly]].net
+    local app = zigbeeAddress[zigbeeName[friendly]].app
+    local group = zigbeeAddress[zigbeeName[friendly]].group
+    local alias = zigbeeAddress[zigbeeName[friendly]].alias
 
     if payload.brightness then
       if payload.state == 'ON' then
         local level = payload.brightness
-        if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
-          local max = zigbeeDevices[zigbee[alias].address].max
-          if max ~= nil then
-            if level == max then level = 255 end
-          end
+        local max = device.max
+        if max ~= nil then
+         if level == max then level = 255 end
         end
         ignoreCbus[alias] = true
         if logging then log('Set '..alias..' to '..level) end
@@ -409,7 +421,32 @@ function outstandingMqttMessage()
       elseif parts[3] == 'groups' then updateGroups(msg.payload)
       end
     else
-      if parts[3] == nil then if not ignoreMqtt[zigbeeAddress[parts[2]]] then statusUpdate(parts[2], msg.payload) else ignoreMqtt[zigbeeAddress[parts[2]]] = nil end end
+      -- Find the friendly name
+      local i
+      local friendly = {}
+      local e = #parts
+      local s = 2
+      for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
+      if parts[#parts] == 'availability' then
+        local avail
+        local decoded = json.decode(msg.payload)
+        if decoded == nil then -- Legacy mode
+          avail = msg.payload == 'online'
+        else
+          avail = decoded.state == 'online'
+        end
+        log(avail)
+        zigbeeDevice[zigbeeName[friendly]].available = avail
+        if logging then log('Device '..friendly..(' is available' and avail or ' is NOT available')) end
+      elseif parts[#parts] == 'set' then -- Do nothing
+      elseif parts[#parts] == 'get' then -- Do nothing
+      else -- Status update
+        if not ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] then
+          statusUpdate(friendly, msg.payload)
+        else
+          ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = nil
+        end
+      end
     end
   end
   mqttMessages = {}
@@ -497,10 +534,11 @@ while true do
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
       stat, err = pcall(publishCurrent) if not stat then log('Error publishing current values: '..err) end -- Log and continue
     else -- Resubscribe
-      local address
-      for address, _ in pairs(subscribed) do
-        ignoreMqtt[zigbeeAddress[address]] = true
-        client:subscribe(mqttTopic..address, mqttQoS)
+      local friendly
+      for friendly, _ in pairs(subscribed) do
+        log(zigbeeName[friendly])
+        ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
+        client:subscribe(mqttTopic..friendly, mqttQoS)
       end
     end
   else
