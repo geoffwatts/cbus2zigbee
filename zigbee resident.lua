@@ -29,6 +29,7 @@ local subscribed = {}
 local zigbee = {}
 local zigbeeAddress = {}
 local zigbeeDevices = {}
+local zigbeeName = {}
 local zigbeeGroups = {}
 local cbusMessages = {} -- message queue
 local mqttMessages = {} -- message queue
@@ -36,7 +37,7 @@ local ignoreMqtt = {} -- when sending from C-Bus to MQTT any status update for C
 local ignoreCbus = {} -- when receiving from MQTT to C-Bus any status update for MQTT will be ignored
 
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
-  'ZIGBEE', 'z=', 'sensor=', 
+  'ZIGBEE', 'name=', 'n=', 'addr=', 'z=', 'sensor=', 
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
@@ -139,6 +140,7 @@ local function getKeyValue(alias, tags, _L, synonym, special, allow)
   for k, t in pairs(tags) do
     k = k:trim()
     if t ~= -1 then
+      if synonym[k] then k = synonym[k] end
       if special[k] ~= nil then special[k] = true end
       local v = t:trim()
       if _L[k] then
@@ -170,6 +172,7 @@ local function cudZig()
   local modCount = 0
   local remCount = 0
   local alias, k, v
+  local synonym = { addr = 'z', name = 'n' }
 
   for alias, v in pairs(grps) do
     local modification = false
@@ -178,10 +181,15 @@ local function cudZig()
     if zigbee[alias] and zigbee[alias].keywords ~= curr then modification = true end
     if not zigbee[alias] or modification then
       local _L = {
+        n = '',
         z = '',
         sensor = '',
       }
-      getKeyValue(alias, v.tags, _L)
+      getKeyValue(alias, v.tags, _L, synonym)
+      if _L.n ~= '' then
+        _L.z = zigbeeName[_L.n]
+        if _L.z == nil then log('Error: Zigbee device with friendly name of '.._L.n..' does not exist, skipping') _L.z = '' end
+      end
       local key = _L.z
       if _L.z:find('^0[xX]%x*$') then
         if not modification then addCount = addCount + 1 else modCount = modCount + 1 end
@@ -283,11 +291,11 @@ function outstandingCbusMessage()
   for _, cmd in ipairs(cbusMessages) do
     parts = cmd:split('/')
     alias = parts[1]..'/'..parts[2]..'/'..parts[3]
-    if ignoreCbus[alias] then goto next end
+    if ignoreCbus[alias] then goto ignore end
     local level = tonumber(parts[4])
     local ramp = tonumber(parts[5]) -- Ignoring ramp for now
     publish(alias, level)
-    ::next::
+    ::ignore::
   end
   cbusMessages = {}
 end
@@ -301,13 +309,16 @@ function updateDevices(payload)
   local found = {}
   local kill = {}
   for _, d in ipairs(payload) do
-    if d.friendly_name and type(d.friendly_name) ~= 'userdata' and d.friendly_name == 'Coordinator' then goto skip end
+    local friendly = nil if d.friendly_name and type(d.friendly_name) ~= 'userdata' then friendly = d.friendly_name end
+
+    if friendly == 'Coordinator' then goto skip end
     found[d.ieee_address] = true
     if zigbeeDevices[d.ieee_address] == nil then
       zigbeeDevices[d.ieee_address] = {}
       if logging then log('Found a device '..d.ieee_address..(d.friendly_name ~= nil and ', '..d.friendly_name or '')) end
     end
-    zigbeeDevices[d.ieee_address].friendly = d.friendly_name
+    zigbeeDevices[d.ieee_address].friendly = friendly
+    zigbeeName[friendly] = d.ieee_address
     if type(d.definition) ~= 'userdata' and d.definition.exposes then
       for _, e in pairs(d.definition.exposes) do
         if e.type == 'light' then
