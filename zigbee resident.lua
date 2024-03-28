@@ -33,11 +33,11 @@ local zigbeeName = {}
 local zigbeeGroups = {}
 local cbusMessages = {} -- message queue
 local mqttMessages = {} -- message queue
-local ignoreMqtt = {} -- when sending from C-Bus to MQTT any status update for C-Bus will be ignored
-local ignoreCbus = {} -- when receiving from MQTT to C-Bus any status update for MQTT will be ignored
+local ignoreMqtt = {} -- when sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
+local ignoreCbus = {} -- when receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
 
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
-  'ZIGBEE', 'name=', 'n=', 'addr=', 'z=', 'sensor=', 
+  'ZIGBEE', 'name=', 'n=', 'addr=', 'z=', 'sensor=', 'type=', 
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
@@ -184,6 +184,7 @@ local function cudZig()
         n = '',
         z = '',
         sensor = '',
+        type = '',
       }
       getKeyValue(alias, v.tags, _L, synonym)
       if _L.n ~= '' then
@@ -197,6 +198,7 @@ local function cudZig()
         if _L.sensor == '' then
           _L.sensor = nil
         else
+          if _L.type == '' then _L.type = 'number' end
           if zigbeeDevices[_L.z] ~= nil then
             if zigbeeDevices[_L.z].exposes ~= nil and zigbeeDevices[_L.z].exposes[_L.sensor] == nil then
               log('Keyword error, device '.._L.z..' has no '.._L.sensor..' exposed')
@@ -204,9 +206,9 @@ local function cudZig()
               if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
             end
             if not zigbeeDevices[_L.z].sensor then
-              zigbeeDevices[_L.z].sensor = { { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, }, }
+              zigbeeDevices[_L.z].sensor = { { expose=_L.sensor, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, }, }
             else
-              table.insert(zigbeeDevices[_L.z].sensor, { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, })
+              table.insert(zigbeeDevices[_L.z].sensor, { expose=_L.sensor, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, })
             end
           else
             log('Error: address for '..alias..', '.._L.z..' does not exist')
@@ -373,6 +375,7 @@ function statusUpdate(friendly, payload)
     for _, s in ipairs(device.sensor) do
       local value = payload[s.expose]
       if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
+      if s.type == 'boolean' then value = value and 1 or 0 end
       if value then
         ignoreCbus[s.alias] = true
         if lighting[tostring(s.app)] then -- Lighting group sensor
