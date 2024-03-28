@@ -189,26 +189,35 @@ local function cudZig()
         if _L.sensor == '' then
           _L.sensor = nil
         else
-          if zigbeeDevices[_L.z].exposes[_L.sensor] == nil then
-            log('Keyword error, device '.._L.z..' has no '.._L.sensor..' exposed')
-            _L.sensor = nil
-            if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
-          end
-          if not zigbeeDevices[_L.z].sensor then
-            zigbeeDevices[_L.z].sensor = { { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, }, }
+          if zigbeeDevices[_L.z] ~= nil then
+            if zigbeeDevices[_L.z].exposes ~= nil and zigbeeDevices[_L.z].exposes[_L.sensor] == nil then
+              log('Keyword error, device '.._L.z..' has no '.._L.sensor..' exposed')
+              _L.sensor = nil
+              if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
+            end
+            if not zigbeeDevices[_L.z].sensor then
+              zigbeeDevices[_L.z].sensor = { { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, }, }
+            else
+              table.insert(zigbeeDevices[_L.z].sensor, { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, })
+            end
           else
-            table.insert(zigbeeDevices[_L.z].sensor, { expose=_L.sensor, alias=alias, net=v.net, app=v.app, group=v.group, })
+            log('Error: address for '..alias..', '.._L.z..' does not exist')
+            zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
+            if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
+            goto next
           end
         end
         zigbee[alias] = { name=v.name, address=address, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
         if not subscribed[address] then
           client:subscribe(mqttTopic..address, mqttQoS)
           subscribed[address] = true
+          if logging then log('Subscribed '..mqttTopic..address) end
         end
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
         zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
       end
+      ::next::
       zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
     end
   end
@@ -237,6 +246,7 @@ end
 Publish to MQTT
 --]]
 function publish(alias, level)
+  if not zigbee[alias].address then return end
   if zigbee[alias].sensor then return end
   if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
     local max = zigbeeDevices[zigbee[alias].address].max
@@ -249,7 +259,9 @@ function publish(alias, level)
     state = (level ~= 0) and "ON" or "OFF",
   }
   ignoreMqtt[alias] = true
-  client:publish(mqttTopic..zigbee[alias].address..'/set', json.encode(msg), QoS, false)
+  local topic = mqttTopic..zigbee[alias].address..'/set'
+  if logging then log('Publish '..topic..', '..json.encode(msg)) end
+  client:publish(topic, json.encode(msg), QoS, false)
 end
 
 
@@ -300,7 +312,7 @@ function updateDevices(payload)
       for _, e in pairs(d.definition.exposes) do
         if e.type == 'light' then
           if e.features and type(d.features) ~= 'userdata' then
-            for f in e.features do
+            for _, f in ipairs(e.features) do
               if f.name == 'brightness' then
                 zigbeeDevices[d.ieee_address].max = value_max
               end
@@ -330,6 +342,7 @@ end
 A device has updated status, so send to C-Bus, untested
 --]]
 function statusUpdate(friendly, payload)
+  if not zigbeeDevices[friendly] then return end
   if zigbeeDevices[friendly].sensor then
     local s
     for _, s in ipairs(zigbeeDevices[friendly].sensor) do
@@ -347,8 +360,6 @@ function statusUpdate(friendly, payload)
       end
     end
   else
-    if not zigbeeAddress[friendly] then return end
-
     local net = zigbeeAddress[friendly].net
     local app = zigbeeAddress[friendly].app
     local group = zigbeeAddress[friendly].group
