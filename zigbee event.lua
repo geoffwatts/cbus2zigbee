@@ -11,7 +11,11 @@ Add a "z=<zigbee address from zigbee2mqtt" to the keyword as well
 local logging = true
 local zPort = 0xBEEF1
 local parts = string.split(event.dst, '/') local net = tonumber(parts[1]) local app = tonumber(parts[2]) local group = tonumber(parts[3])
-ramp = GetCBusRampRate(net, app, group)
+if app ~= 228 and app ~= 250 then
+  ramp = GetCBusRampRate(net, app, group)
+else
+  ramp = 0
+end
 
 -- Send an event to zigbee2mqtt
 local output = event.dst.."/"..event.getvalue().."/"..ramp
