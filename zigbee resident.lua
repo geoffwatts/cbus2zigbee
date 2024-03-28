@@ -88,7 +88,8 @@ client.ON_DISCONNECT = function()
 end
 
 client.ON_MESSAGE = function(mid, topic, payload)
-  mqttMessages[#mqttMessages + 1] = { topic=topic, payload=json.decode(payload) } -- Queue the message
+  local p if payload:sub(1,1) == '{' or payload:sub(1,1) == '[' then p = json.decode(payload) else p = payload end -- If not JSON then pass the string
+  mqttMessages[#mqttMessages + 1] = { topic=topic, payload=p } -- Queue the message
 end
 
 
@@ -221,9 +222,9 @@ local function cudZig()
         local friendly = zigbeeDevices[address].friendly
         if not subscribed[friendly] then
           ignoreMqtt[alias] = true
-          client:subscribe(mqttTopic..friendly, mqttQoS)
+          client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
           subscribed[friendly] = true
-          if logging then log('Subscribed '..mqttTopic..friendly) end
+          if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
         end
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
@@ -427,23 +428,23 @@ function outstandingMqttMessage()
       -- Find the friendly name
       local i
       local friendly = {}
-      local e = #parts
       local s = 2
-      for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
       if parts[#parts] == 'availability' then
         local avail
-        local decoded = json.decode(msg.payload)
-        if decoded == nil then -- Legacy mode
+        local e = #parts - 1
+        for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
+        if type(msg.payload) == 'string' then -- Legacy mode
           avail = msg.payload == 'online'
         else
-          avail = decoded.state == 'online'
+          avail = msg.payload.state == 'online'
         end
-        log(avail)
-        zigbeeDevice[zigbeeName[friendly]].available = avail
-        if logging then log('Device '..friendly..(' is available' and avail or ' is NOT available')) end
+        zigbeeDevices[zigbeeName[friendly]].available = avail
+        if logging then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
       elseif parts[#parts] == 'set' then -- Do nothing
       elseif parts[#parts] == 'get' then -- Do nothing
       else -- Status update
+        local e = #parts
+        for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
         if not ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] then
           statusUpdate(friendly, msg.payload)
         else
