@@ -21,20 +21,20 @@ local mqttTimeout = 0
 
 local zPort = 0xBEEF1
 local mqttTopic = "zigbee2mqtt/"
-local mqttStatus = 2 -- initially disconnected from broker
-local init = true -- mqtt initialise
-local reconnect = false -- reconnecting to broker
-local QoS = 2 -- send exactly once
-local subscribed = {}
-local zigbee = {}
-local zigbeeAddress = {}
-local zigbeeDevices = {}
-local zigbeeName = {}
-local zigbeeGroups = {}
-local cbusMessages = {} -- message queue
-local mqttMessages = {} -- message queue
-local ignoreMqtt = {} -- when sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
-local ignoreCbus = {} -- when receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
+local mqttStatus = 2        -- Initially disconnected from broker
+local init = true           -- Broker initialise
+local reconnect = false     -- Reconnecting to broker
+local QoS = 2               -- Send exactly once
+local subscribed = {}       -- Topics that have been subscribed to
+local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords }
+local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group }
+local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ expose=, type, alias, net, app, group } }
+local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
+local zigbeeGroups = {}     -- TO DO
+local cbusMessages = {}     -- Message queue, inbound from C-Bus
+local mqttMessages = {}     -- Message queue, inbound from Mosquitto
+local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
+local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
 
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
   'ZIGBEE', 'name=', 'n=', 'addr=', 'z=', 'sensor=', 'type=', 
@@ -50,7 +50,7 @@ local function removeIrrelevant(keywords)
   return table.concat(curr, ',')
 end
 
-local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether any table members
+local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether a table has any members
 
 
 --[[
@@ -88,7 +88,7 @@ client.ON_DISCONNECT = function()
 end
 
 client.ON_MESSAGE = function(mid, topic, payload)
-  local p if payload:sub(1,1) == '{' or payload:sub(1,1) == '[' then p = json.decode(payload) else p = payload end -- If not JSON then pass the string
+  local p if payload:sub(1,1) == '{' or payload:sub(1,1) == '[' then p = json.decode(payload) else p = payload end -- If not JSON then pass the string (for legacy available flag)
   mqttMessages[#mqttMessages + 1] = { topic=topic, payload=p } -- Queue the message
 end
 
@@ -96,7 +96,7 @@ end
 --[[
 C-Bus events to MQTT local listener
 --]]
-pcall(function () server:close() end) -- force close the socket on re-entry due to script error
+pcall(function () server:close() end) -- Force close the socket on re-entry due to script error
 server = require('socket').udp()
 server:settimeout(socketTimeout)
 server:setsockname('127.0.0.1', zPort)
@@ -131,12 +131,12 @@ end
 
 
 --[[
-Get key/value pairs. Returns a keyword if found in 'allow'. (allow, synonym and special parameters are optional).
+Get key/value pairs. Returns a keyword if found in 'allow'. (synonym, special and allow parameters are optional).
 --]]
 local function getKeyValue(alias, tags, _L, synonym, special, allow)
-  if synonym == nil then synonym = {} end
-  if special == nil then special = {} end
-  if allow == nil then allow = {} end
+  if synonym == nil then synonym = {} end -- A table of { synonym = keyword, ... }
+  if special == nil then special = {} end -- Special meaning keywords, initially { specialkw = false, ... }, set to true if the keyword is present
+  if allow == nil then allow = {} end     -- A table of keywords that are mutually exclusive, i.e. cannot be used together
   local dType = nil
   for k, t in pairs(tags) do
     k = k:trim()
@@ -155,7 +155,7 @@ local function getKeyValue(alias, tags, _L, synonym, special, allow)
       if synonym[k] then k = synonym[k] end
       if special[k] ~= nil then special[k] = true end
       if allow[k] then
-        if dType == nil then dType = k else error('Error: More than one "type" keyword used for '..alias) end
+        if dType == nil then dType = k else error('Error: More than one "exclusive" keyword used for '..alias) end
       end
     end
   end
@@ -394,6 +394,7 @@ function statusUpdate(friendly, payload)
     local group = zigbeeAddress[zigbeeName[friendly]].group
     local alias = zigbeeAddress[zigbeeName[friendly]].alias
 
+    --- TODO switches...
     if payload.brightness then
       if payload.state == 'ON' then
         local level = payload.brightness
@@ -430,7 +431,7 @@ function outstandingMqttMessage()
       local friendly = {}
       local s = 2
       if parts[#parts] == 'availability' then
-        local avail
+        local avail = false
         local e = #parts - 1
         for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
         if type(msg.payload) == 'string' then -- Legacy mode
