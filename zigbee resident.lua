@@ -466,7 +466,7 @@ local timeoutStart, connectStart, mqttConnected
 
 local changesChecked = socket.gettime()
 
--- Main loop: process commands
+-- Main loop: Process both C-Bus and Mosquitto broker messages
 while true do
   local stat, err
 
@@ -488,7 +488,7 @@ while true do
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
     end
   elseif mqttStatus == 2 or not mqttStatus then
-    -- MQTT is disconnected, so attempt a connection, waiting. If fail to connect then retry.
+    -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
     if init then
       log('Connecting to Mosquitto broker')
       timeoutStart = socket.gettime()
@@ -501,25 +501,24 @@ while true do
       do return end
     end
     while mqttStatus ~= 1 do
-      client:loop(1) -- Service the client with a generous timeout
+      client:loop(1) -- Service the client on startup with a generous timeout
       if socket.gettime() - connectStart > timeout then
         if socket.gettime() - timeoutStart > warningTimeout then
           log('Failed to connect to the Mosquitto broker, retrying continuously')
           timeoutStart = socket.gettime()
         end
         connectStart = socket.gettime()
-        goto next -- Exit to the main loop to keep socket messages monitored
+        goto next -- Exit to the main loop to keep localbus messages monitored
       end
     end
     mqttConnected = socket.gettime()
-    -- Subscribe to relevant topics
+    -- Subscribe to bridge topics
     client:subscribe(mqttTopic..'bridge/#', mqttQoS)
-    -- Connected... Now loop briefly to allow retained value retrieval for subscribed topics because synchronous
+    -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
     while socket.gettime() - mqttConnected < 0.5 do
       client:loop(0)
       if #mqttMessages > 0 then
-        -- Send outstanding messages to CBus
-        stat, err = pcall(outstandingMqttMessage)
+        stat, err = pcall(outstandingMqttMessage) -- Process outstanding bridge messages
         if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
       end
     end
@@ -542,7 +541,7 @@ while true do
   local t = socket.gettime()
   if checkChanges and t > changesChecked + checkChanges then
     changesChecked = t
-    stat, err = pcall(cudZig) if not stat then log('Error publishing current values: '..err) end
+    stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
   end
 
   ::next::
