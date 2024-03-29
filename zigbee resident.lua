@@ -10,23 +10,21 @@ mqtt_broker = '192.168.1.1'
 mqtt_username = ''
 mqtt_password = ''
 mqtt_clientid = 'cbus2zigbee'
-eventName = 'zigbee' -- The name of the Zigbee event script
 local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 
 local logging = true
 
-local socketTimeout = 0.1
+local busTimeout = 0.1
 local mqttTimeout = 0
 
-local zPort = 0xBEEF1
 local mqttTopic = "zigbee2mqtt/"
 local mqttStatus = 2        -- Initially disconnected from broker
 local init = true           -- Broker initialise
 local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
-local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords }
+local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords, sensor, datatype }
 local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group }
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ expose=, type, alias, net, app, group } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
@@ -51,20 +49,6 @@ local function removeIrrelevant(keywords)
 end
 
 local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether a table has any members
-
-
---[[
-Check for presence of the event script
---]]
-local eventScripts = db:getall("SELECT name FROM scripting WHERE type = 'event'")
-found = false
-for _, s in ipairs(eventScripts) do
-  if s.name:lower() == eventName:lower() then found = true eventName = s.name end
-end
-if not found then
-  log('Error: Event-based script \''..eventName..'\' not found. Halting')
-  while true do socket.select(nil, nil, 1) end
-end
 
 
 --[[
@@ -94,12 +78,25 @@ end
 
 
 --[[
-C-Bus events to MQTT local listener
+C-Bus events
 --]]
-pcall(function () server:close() end) -- Force close the socket on re-entry due to script error
-server = require('socket').udp()
-server:settimeout(socketTimeout)
-server:setsockname('127.0.0.1', zPort)
+require('genohm-scada.eibdgm')
+localbus = eibdgm:new({ timeout=busTimeout })
+
+local function eventCallback(event)
+  if not zigbee[event.dst] then return end
+  -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This is weirdly returning nil, desepite datahex having a value 
+  local value = grp.getvalue(event.dst)
+  local ramp = 0
+  local parts = string.split(event.dst, '/')
+  if lighting[parts[2]] then
+    ramp = GetCBusRampRate(tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3]))
+    if ramp > 0 then if value ~= GetCBusTargetLevel(tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3])) then return end end
+  end
+  cbusMessages[#cbusMessages + 1] = event.dst.."/"..value.."/"..ramp -- Queue the event
+end
+
+localbus:sethandler('groupwrite', eventCallback)
 
 
 --[[
@@ -176,11 +173,13 @@ local function cudZig()
   local synonym = { addr = 'z', name = 'n' }
 
   for alias, v in pairs(grps) do
+    local datatype = grp.find(alias).datatype
     local modification = false
     found[alias] = true
     local curr = removeIrrelevant(v.keywords)
     if zigbee[alias] and zigbee[alias].keywords ~= curr then modification = true end
     if not zigbee[alias] or modification then
+      zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, datatype=datatype } 
       local _L = {
         n = '',
         z = '',
@@ -213,12 +212,12 @@ local function cudZig()
             end
           else
             log('Error: address for '..alias..', '.._L.z..' does not exist')
-            zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
             if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
             goto next
           end
         end
-        zigbee[alias] = { name=v.name, address=address, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
+        zigbee[alias].address = address
+        zigbee[alias].sensor = _L.sensor
         local friendly = zigbeeDevices[address].friendly
         if not subscribed[friendly] then
           ignoreMqtt[alias] = true
@@ -228,7 +227,6 @@ local function cudZig()
         end
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
-        zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
       end
       ::next::
       zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
@@ -248,14 +246,11 @@ local function cudZig()
     end
   end
   if remCount > 0 then
-    log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or '')..', event script \''..eventName..'\' restarted')
+    log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or ''))
   end
   -- Log it, and restart scripts if appropriate
-  if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')..(addCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-  if modCount > 0 then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')..(modCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-  if addCount > 0 or modCount > 0 or remCount > 0 then
-    script.disable(eventName) script.enable(eventName) -- Ensure that newly changed keyworded groups send updates
-  end
+  if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')) end
+  if modCount > 0 then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')) end
 end
 
 
@@ -467,21 +462,9 @@ local changesChecked = socket.gettime()
 
 -- Main loop: process commands
 while true do
-  -- Check for new messages from CBus. The entire socket buffer is collected each iteration for efficiency.
   local stat, err
-  local more = false
-  stat, err = pcall(function ()
-    ::checkAgain::
-    local cmd = nil
-    cmd = server:receive()
-    if cmd and type(cmd) == 'string' then
-      cbusMessages[#cbusMessages + 1] = cmd -- Queue the new message
-      server:settimeout(0); more = true; goto checkAgain -- Immediately check for more buffered inbound messages to queue
-    else
-      if more then server:settimeout(socketTimeout) end
-    end
-  end)
-  if not stat then log('Socket receive error: '..err) end
+
+  localbus:step()
 
   if mqttStatus == 1 then
     -- Process MQTT message buffers synchronously - sends and receives
@@ -509,7 +492,6 @@ while true do
     stat, err = pcall(function (b, p, k) client:connect(b, p, k) end, mqttBroker, 1883, 25) -- Requested keep-alive 25 seconds, broker at port 1883
     if not stat then -- Log and abort
       log('Error calling connect to broker: '..err)
-      pcall(function () server:close() end)
       do return end
     end
     while mqttStatus ~= 1 do
@@ -541,19 +523,18 @@ while true do
     else -- Resubscribe
       local friendly
       for friendly, _ in pairs(subscribed) do
-        log(zigbeeName[friendly])
         ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
-        client:subscribe(mqttTopic..friendly, mqttQoS)
+        client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
+        if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
       end
     end
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
-    pcall(function () server:close() end)
     do return end
   end
 
   local t = socket.gettime()
-  if checkChanges and t > changesChecked then
+  if checkChanges and t > changesChecked + checkChanges then
     changesChecked = t
     stat, err = pcall(cudZig) if not stat then log('Error publishing current values: '..err) end
   end
