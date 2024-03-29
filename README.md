@@ -1,4 +1,4 @@
-# Clipsal C-Bus Automation Controller Integration with Zigbee2mqtt
+# Clipsal C-Bus Automation Controller Integration with Zigbee2MQTT
 
 ## Overview
 
@@ -28,15 +28,21 @@ The integration consists of a single resident script, which listens for both C-B
 
 Along with the keyword ZIGBEE, the available keywords to use are as follows, with either z= or n= being required.
 
-* n=My Device, which will use the device friendly name, which may include '/'. (name= is an alias.) The IEEE address will be looked up.
+* n=My Device, to use the device friendly name, which may include '/'. (name= is an alias.) The IEEE address will be looked up.
 
 ... or
-* z=0x12345678abcdef123, which is the IEEE address of the Zigbee device, which should be used where a friendly name is not defined, or if one is defined and z= is used then the friendly name will be looked up. (addr= is an alias.)
+* z=0x12345678abcdef123, to use the IEEE address of the Zigbee device, which should be used where a friendly name is not defined, or if one is defined and z= is used then the friendly name will be looked up. (addr= is an alias.)
 
 For Zigbee sensors, add the following:
 
 * sensor=exposes_name, to tie a C-Bus user parameter or lighting object to an exposed Zigbee value
-* type=number|boolean, to specify the data type
+* type=number|boolean, to specify the data type ("number" is the default)
+
+### Keyword Examples
+
+* ZIGBEE, z=0xa4c1389bf2e3ae5f, 
+* ZIGBEE, name=office/office desk strip, 
+* ZIGBEE, addr=0x00169a00022256da, sensor=humidity, 
 
 ## Contributing
 
