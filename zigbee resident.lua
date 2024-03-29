@@ -536,6 +536,7 @@ while true do
       for _, friendly in ipairs(onReconnect) do
         ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
         client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
+        subscribed[friendly] = true
         if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
       end
       onReconnect = {}
