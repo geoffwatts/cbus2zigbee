@@ -75,7 +75,7 @@ client.ON_DISCONNECT = function()
 end
 
 client.ON_MESSAGE = function(mid, topic, payload)
-  local p if payload:sub(1,1) == '{' or payload:sub(1,1) == '[' then p = json.decode(payload) else p = payload end -- If not JSON then pass the string (for legacy available flag)
+  local p if payload:sub(1,1) == '{' or payload:sub(1,1) == '[' then p = json.decode(payload) else p = payload end -- If not JSON then pass the string (for legacy availability flag)
   mqttMessages[#mqttMessages + 1] = { topic=topic, payload=p } -- Queue the message
 end
 
@@ -83,8 +83,6 @@ end
 --[[
 C-Bus events, only queues a C-Bus message at the end of a ramp
 --]]
-localbus = require('localbus').new(busTimeout)
-
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
   -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This will return nil, as I don't think decode works for AC use
@@ -104,6 +102,7 @@ local function eventCallback(event)
   cbusMessages[#cbusMessages + 1] = event.dst.."/"..value.."/"..ramp -- Queue the event
 end
 
+local localbus = require('localbus').new(busTimeout) -- Set up the localbus
 localbus:sethandler('groupwrite', eventCallback)
 
 
@@ -171,7 +170,8 @@ local function cudZig()
   local modCount = 0
   local remCount = 0
   local alias, k, v
-  local synonym = { addr = 'z', name = 'n' }
+  local synonym = { addr = 'z', name = 'n' } -- Synonyms for some keywords, allowing variations
+  local special = {} -- special use keywords, e.g. { noavailqueue=true, }
 
   for alias, v in pairs(grps) do
     local datatype = grp.find(alias).datatype
@@ -187,7 +187,7 @@ local function cudZig()
         sensor = '',
         type = '',
       }
-      getKeyValue(alias, v.tags, _L, synonym)
+      getKeyValue(alias, v.tags, _L, synonym, special)
       if _L.n ~= '' then
         _L.z = zigbeeName[_L.n]
         if _L.z == nil then log('Error: Zigbee device with friendly name of '.._L.n..' does not exist, skipping') _L.z = '' end
@@ -311,7 +311,7 @@ end
 
 
 --[[
-Available devices has changed, untested
+Available devices has changed
 --]]
 function updateDevices(payload)
   local d, e, f, new, modified
@@ -365,7 +365,7 @@ end
 
 
 --[[
-A device has updated status, so send to C-Bus, untested
+A device has updated status, so send to C-Bus
 --]]
 function statusUpdate(friendly, payload)
   local device
@@ -462,6 +462,8 @@ end
 local warningTimeout = 30
 local timeout = 1
 local timeoutStart, connectStart, mqttConnected
+local onReconnect = {}
+local bridgeSubscribed = false
 
 local changesChecked = socket.gettime()
 
@@ -487,7 +489,18 @@ while true do
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
     end
   elseif mqttStatus == 2 or not mqttStatus then
+    if bridgeSubscribed then
+      client:unsubscribe(mqttTopic..'bridge/#', mqttQoS)
+      bridgeSubscribed = false
+    if logging then log('Unsubscribed '..mqttTopic..'bridge/#') end
+    end
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
+    for friendly, _ in pairs(subscribed) do
+      client:unsubscribe(mqttTopic..friendly..'/#', mqttQoS)
+      if logging then log('Unubscribed '..mqttTopic..friendly..'/#') end
+      table.insert(onReconnect, friendly)
+      subscribed[friendly] = nil
+    end
     if init then
       log('Connecting to Mosquitto broker')
       timeoutStart = socket.gettime()
@@ -513,6 +526,8 @@ while true do
     mqttConnected = socket.gettime()
     -- Subscribe to bridge topics
     client:subscribe(mqttTopic..'bridge/#', mqttQoS)
+    if logging then log('Subscribed '..mqttTopic..'bridge/#') end
+    bridgeSubscribed = true
     -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
     while socket.gettime() - mqttConnected < 0.5 do
       client:loop(0)
@@ -526,11 +541,13 @@ while true do
       stat, err = pcall(publishCurrent) if not stat then log('Error publishing current values: '..err) end -- Log and continue
     else -- Resubscribe
       local friendly
-      for friendly, _ in pairs(subscribed) do
+      for _, friendly in ipairs(onReconnect) do
         ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
         client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
+        subscribed[friendly] = true
         if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
       end
+      onReconnect = {}
     end
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
