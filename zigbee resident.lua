@@ -24,7 +24,7 @@ local init = true           -- Broker initialise
 local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
-local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords, sensor, datatype }
+local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords, sensor, datatype, value }
 local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group }
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ expose=, type, alias, net, app, group } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
@@ -78,21 +78,27 @@ end
 
 
 --[[
-C-Bus events
+C-Bus events, only queues a C-Bus message at the end of a ramp
 --]]
 require('genohm-scada.eibdgm')
 localbus = eibdgm:new({ timeout=busTimeout })
 
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
-  -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This is weirdly returning nil, desepite datahex having a value 
-  local value = grp.getvalue(event.dst)
+  -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This will return nil, as I don't think decode works for AC use
+  local value
   local ramp = 0
   local parts = string.split(event.dst, '/')
   if lighting[parts[2]] then
-    ramp = GetCBusRampRate(tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3]))
-    if ramp > 0 then if value ~= GetCBusTargetLevel(tonumber(parts[1]), tonumber(parts[2]), tonumber(parts[3])) then return end end
+    value = tonumber(string.sub(event.datahex,1,2),16)
+    local target = tonumber(string.sub(event.datahex,3,4),16)
+    local ramp = tonumber(string.sub(event.datahex,5,8),16)
+    if ramp > 0 then if value ~= target then return end end
+  else
+    value = grp.getvalue(event.dst)
   end
+  if value == zigbee[event.dst].value then return end -- Don't publish if already at the level, avoids publishing twice when a ramp occurs
+  zigbee[event.dst].value = value
   cbusMessages[#cbusMessages + 1] = event.dst.."/"..value.."/"..ramp -- Queue the event
 end
 
@@ -218,6 +224,7 @@ local function cudZig()
         end
         zigbee[alias].address = address
         zigbee[alias].sensor = _L.sensor
+        zigbee[alias].value = grp.getvalue(alias)
         local friendly = zigbeeDevices[address].friendly
         if not subscribed[friendly] then
           ignoreMqtt[alias] = true
