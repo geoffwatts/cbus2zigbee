@@ -80,8 +80,7 @@ end
 --[[
 C-Bus events, only queues a C-Bus message at the end of a ramp
 --]]
-require('genohm-scada.eibdgm')
-localbus = eibdgm:new({ timeout=busTimeout })
+localbus = require('localbus').new(busTimeout)
 
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
