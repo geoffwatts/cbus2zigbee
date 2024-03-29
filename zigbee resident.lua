@@ -463,6 +463,7 @@ local warningTimeout = 30
 local timeout = 1
 local timeoutStart, connectStart, mqttConnected
 local onReconnect = {}
+local bridgeSubscribed = false
 
 local changesChecked = socket.gettime()
 
@@ -488,6 +489,11 @@ while true do
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
     end
   elseif mqttStatus == 2 or not mqttStatus then
+    if bridgeSubscribed then
+      client:unsubscribe(mqttTopic..'bridge/#', mqttQoS)
+      bridgeSubscribed = false
+    if logging then log('Unsubscribed '..mqttTopic..'bridge/#') end
+    end
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
     for friendly, _ in pairs(subscribed) do
       client:unsubscribe(mqttTopic..friendly..'/#', mqttQoS)
@@ -520,6 +526,8 @@ while true do
     mqttConnected = socket.gettime()
     -- Subscribe to bridge topics
     client:subscribe(mqttTopic..'bridge/#', mqttQoS)
+    if logging then log('Subscribed '..mqttTopic..'bridge/#') end
+    bridgeSubscribed = true
     -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
     while socket.gettime() - mqttConnected < 0.5 do
       client:loop(0)
