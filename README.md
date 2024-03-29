@@ -1,36 +1,52 @@
-# Clipsal C-Bus Automation Controller Integration with Zigbee2mqtt
+# Clipsal C-Bus Automation Controller Integration with Zigbee2MQTT
 
 ## Overview
 
-This project provides integration between Clipsal C-Bus automation controllers and Zigbee2mqtt, allowing changes in C-Bus groups (lights) to instantly turn on, off or dim zigbee devices.
+This project provides integration between Clipsal C-Bus automation controllers and Zigbee2MQTT.
 
-The integration consists of two main components:
-
-1. **Event Script**: A Lua script running on the C-Bus automation controller triggers events during C-Bus device state changes. These events are then relayed to Zigbee2mqtt for further processing.
-
-2. **Resident Script**: Another Lua script running on the C-Bus automation controller listens for events from the event script and publishes corresponding commands to Zigbee2mqtt via MQTT, controlling Zigbee devices accordingly.
+The integration consists of a single resident script, which listens for both C-Bus level changes and Mosquitto broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects. Lighting group and user parameters are implemented.
 
 ## Setup
 
 ### Prerequisites
 
-- Clipsal C-Bus automation controller with Lua scripting support.
-- Zigbee2mqtt instance running on a compatible device (e.g., Raspberry Pi) in the same network as the C-Bus controller.
-- MQTT broker (such as Mosquitto) accessible to both the C-Bus controller and Zigbee2mqtt.
+- Clipsal C-Bus automation controller (SHAC, NAC, AC2, NAC2).
+- Zigbee2mqtt instance running on a compatible device (e.g., Raspberry Pi, Home Assistant add-in) in the same network as the C-Bus controller.
+- Mosquitto broker (such as Mosquitto, Home Assistant add-in) accessible to both the C-Bus controller and Zigbee2MQTT.
 
 ### Installation Steps
 
-1. **Install Lua Scripts**: Create an event script called ZIGBEE, and paste "zigbee event.lua" in that script.  Mark that script "execute during ramping" so that the controller will send updates to dim the lights during a ramp.  Create a resident script and paste "zigbee resident.lua".  
+1. **Install Lua Script**: Create a resident script, call it what you want with a sensible sleep interval (zero is fine) and paste "zigbee resident.lua".  
 
-2. **Configure Zigbee2mqtt**: Ensure that Zigbee2mqtt is configured correctly and is running on a device reachable from the C-Bus controller.
+2. **Configure Zigbee2MQTT**: Ensure that Zigbee2MQTT is configured correctly.
 
-3. **Update Configuration**: Modify the Lua scripts to include the MQTT broker details and any other configuration specific to your setup.
+3. **Update Configuration**: Modify the Lua scripts to include the Mosquitto broker details and any other configuration specific to your setup.
 
-4. **Assign Zigbee Addresses**: Tag C-Bus devices with the `ZIGBEE` keyword and include the Zigbee device's address using the `z=<zigbee address>` tag. Alternatively, populate the `addresses` table in the Lua scripts with mappings between C-Bus group addresses and Zigbee device addresses, which will perform better (but I may remove in future versions, particularly as I update this to bidirectional)
+4. **Configure Automation Controller keywords**: Tag C-Bus devices with the "ZIGBEE" keyword and other keywords as described below.
+
+### Keywords
+
+Along with the keyword ZIGBEE, the available keywords to use are as follows, with either z= or n= being required.
+
+* n=My Device, to use the device friendly name, which may include '/'. (name= is an alias.) The IEEE address will be looked up.
+
+... or
+* z=0x12345678abcdef123, to use the IEEE address of the Zigbee device, which should be used where a friendly name is not defined, or if one is defined and z= is used then the friendly name will be looked up. (addr= is an alias.)
+
+For Zigbee sensors, add the following:
+
+* sensor=exposes_name, to tie a C-Bus user parameter or lighting object to an exposed Zigbee value
+* type=number|boolean, to specify the data type ("number" is the default)
+
+### Keyword Examples
+
+* ZIGBEE, z=0xa4c1389bf2e3ae5f, 
+* ZIGBEE, name=office/office desk strip, 
+* ZIGBEE, addr=0x00169a00022256da, sensor=humidity, 
 
 ## Contributing
 
-Contributions to this project are welcome! If you encounter any issues, have feature requests, or would like to contribute improvements, please open an issue or submit a pull request.  I have also started talking about this on the C-Bus Forums at https://www.cbusforums.com/threads/cbus2zigbee.11245/
+Contributions to this project are welcome! If you encounter any issues, have feature requests, or would like to contribute improvements, please open an issue or submit a pull request. I have also started talking about this on the C-Bus Forums at https://www.cbusforums.com/threads/cbus2zigbee.11245/
 
 ## License
 

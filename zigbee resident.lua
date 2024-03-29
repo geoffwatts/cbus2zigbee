@@ -1,34 +1,35 @@
 --[[
-Resident script
+C-Bus integration for Zigbee2MQTT.
 
-Actually does the talking to zigbee2mqtt via MQTT.
+Update your Mosquitto broker address and credentials below.
 
-Update your MQTT credentials below:
+Required keywords for automation controller objects are described in the readme at https://github.com/geoffwatts/cbus2zigbee.
+
+Copyright (c) 2024, Geoff Watts. Subject to BSD 3-Clause License.
 --]]
 
 mqtt_broker = '192.168.1.1'
 mqtt_username = ''
 mqtt_password = ''
 mqtt_clientid = 'cbus2zigbee'
-eventName = 'zigbee' -- The name of the Zigbee event script
 local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
+local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, queue outstanding C-Bus to zigbee messages
 
 local logging = true
 
-local socketTimeout = 0.1
+local busTimeout = 0.1
 local mqttTimeout = 0
 
-local zPort = 0xBEEF1
 local mqttTopic = "zigbee2mqtt/"
 local mqttStatus = 2        -- Initially disconnected from broker
 local init = true           -- Broker initialise
 local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
-local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords }
+local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords, sensor, datatype, value }
 local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group }
-local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ expose=, type, alias, net, app, group } }
+local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ {expose, type, alias, net, app, group}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
 local cbusMessages = {}     -- Message queue, inbound from C-Bus
@@ -51,20 +52,6 @@ local function removeIrrelevant(keywords)
 end
 
 local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether a table has any members
-
-
---[[
-Check for presence of the event script
---]]
-local eventScripts = db:getall("SELECT name FROM scripting WHERE type = 'event'")
-found = false
-for _, s in ipairs(eventScripts) do
-  if s.name:lower() == eventName:lower() then found = true eventName = s.name end
-end
-if not found then
-  log('Error: Event-based script \''..eventName..'\' not found. Halting')
-  while true do socket.select(nil, nil, 1) end
-end
 
 
 --[[
@@ -94,12 +81,30 @@ end
 
 
 --[[
-C-Bus events to MQTT local listener
+C-Bus events, only queues a C-Bus message at the end of a ramp
 --]]
-pcall(function () server:close() end) -- Force close the socket on re-entry due to script error
-server = require('socket').udp()
-server:settimeout(socketTimeout)
-server:setsockname('127.0.0.1', zPort)
+localbus = require('localbus').new(busTimeout)
+
+local function eventCallback(event)
+  if not zigbee[event.dst] then return end
+  -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This will return nil, as I don't think decode works for AC use
+  local value
+  local ramp = 0
+  local parts = string.split(event.dst, '/')
+  if lighting[parts[2]] then
+    value = tonumber(string.sub(event.datahex,1,2),16)
+    local target = tonumber(string.sub(event.datahex,3,4),16)
+    local ramp = tonumber(string.sub(event.datahex,5,8),16)
+    if ramp > 0 then if value ~= target then return end end
+  else
+    value = grp.getvalue(event.dst)
+  end
+  if value == zigbee[event.dst].value then return end -- Don't publish if already at the level, avoids publishing twice when a ramp occurs
+  zigbee[event.dst].value = value
+  cbusMessages[#cbusMessages + 1] = event.dst.."/"..value.."/"..ramp -- Queue the event
+end
+
+localbus:sethandler('groupwrite', eventCallback)
 
 
 --[[
@@ -131,15 +136,12 @@ end
 
 
 --[[
-Get key/value pairs. Returns a keyword if found in 'allow'. (synonym, special and allow parameters are optional).
+Get key/value pairs, synonym and special parameters are optional
 --]]
-local function getKeyValue(alias, tags, _L, synonym, special, allow)
+local function getKeyValue(alias, tags, _L, synonym, special)
   if synonym == nil then synonym = {} end -- A table of { synonym = keyword, ... }
   if special == nil then special = {} end -- Special meaning keywords, initially { specialkw = false, ... }, set to true if the keyword is present
-  if allow == nil then allow = {} end     -- A table of keywords that are mutually exclusive, i.e. cannot be used together
-  local dType = nil
   for k, t in pairs(tags) do
-    k = k:trim()
     if t ~= -1 then
       if synonym[k] then k = synonym[k] end
       if special[k] ~= nil then special[k] = true end
@@ -154,12 +156,8 @@ local function getKeyValue(alias, tags, _L, synonym, special, allow)
     else
       if synonym[k] then k = synonym[k] end
       if special[k] ~= nil then special[k] = true end
-      if allow[k] then
-        if dType == nil then dType = k else error('Error: More than one "exclusive" keyword used for '..alias) end
-      end
     end
   end
-  return dType
 end
 
 
@@ -176,11 +174,13 @@ local function cudZig()
   local synonym = { addr = 'z', name = 'n' }
 
   for alias, v in pairs(grps) do
+    local datatype = grp.find(alias).datatype
     local modification = false
     found[alias] = true
     local curr = removeIrrelevant(v.keywords)
     if zigbee[alias] and zigbee[alias].keywords ~= curr then modification = true end
     if not zigbee[alias] or modification then
+      zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, datatype=datatype } 
       local _L = {
         n = '',
         z = '',
@@ -213,12 +213,13 @@ local function cudZig()
             end
           else
             log('Error: address for '..alias..', '.._L.z..' does not exist')
-            zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
             if not modification then addCount = addCount - 1 else modCount = modCount - 1 end
             goto next
           end
         end
-        zigbee[alias] = { name=v.name, address=address, net=v.net, app=v.app, group=v.group, keywords=curr, sensor=_L.sensor }
+        zigbee[alias].address = address
+        zigbee[alias].sensor = _L.sensor
+        zigbee[alias].value = grp.getvalue(alias)
         local friendly = zigbeeDevices[address].friendly
         if not subscribed[friendly] then
           ignoreMqtt[alias] = true
@@ -228,7 +229,6 @@ local function cudZig()
         end
       else
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
-        zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, } 
       end
       ::next::
       zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
@@ -248,14 +248,11 @@ local function cudZig()
     end
   end
   if remCount > 0 then
-    log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or '')..', event script \''..eventName..'\' restarted')
+    log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or ''))
   end
   -- Log it, and restart scripts if appropriate
-  if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')..(addCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-  if modCount > 0 then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')..(modCount > 0 and ', event script \''..eventName..'\' restarted' or '')) end
-  if addCount > 0 or modCount > 0 or remCount > 0 then
-    script.disable(eventName) script.enable(eventName) -- Ensure that newly changed keyworded groups send updates
-  end
+  if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')) end
+  if modCount > 0 then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')) end
 end
 
 
@@ -263,8 +260,9 @@ end
 Publish to MQTT
 --]]
 function publish(alias, level)
-  if not zigbee[alias].address then return end
-  if zigbee[alias].sensor then return end
+  if not zigbee[alias].address then return 2 end
+  if zigbee[alias].sensor then return 2 end
+  if not zigbeeDevices[zigbee[alias].address].available then if keepMessagesForOfflineQueued then return 1 else return 2 end end -- Device is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
   if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
     local max = zigbeeDevices[zigbee[alias].address].max
     if max ~= nil then
@@ -279,6 +277,7 @@ function publish(alias, level)
   local topic = mqttTopic..zigbeeDevices[zigbee[alias].address].friendly..'/set'
   if logging then log('Publish '..alias..' '..topic..', '..json.encode(msg)) end
   client:publish(topic, json.encode(msg), QoS, false)
+  return 0
 end
 
 
@@ -297,16 +296,17 @@ end
 Receive commands from C-Bus and publish to MQTT
 --]]
 function outstandingCbusMessage()
+  local keep = {}
   for _, cmd in ipairs(cbusMessages) do
     parts = cmd:split('/')
     alias = parts[1]..'/'..parts[2]..'/'..parts[3]
     if ignoreCbus[alias] then goto ignore end
     local level = tonumber(parts[4])
     local ramp = tonumber(parts[5]) -- Ignoring ramp for now
-    publish(alias, level)
+    if publish(alias, level) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
     ::ignore::
   end
-  cbusMessages = {}
+  cbusMessages = keep
 end
 
 
@@ -326,7 +326,7 @@ function updateDevices(payload)
     found[d.ieee_address] = true
     if zigbeeDevices[d.ieee_address] == nil then
       new = true
-      zigbeeDevices[d.ieee_address] = {}
+      zigbeeDevices[d.ieee_address] = { available=true } -- Initially available, updated on device topic subscribe if availability is configured
       if logging then log('Found a device '..d.ieee_address..(d.friendly_name ~= nil and ' (friendly name: '..d.friendly_name..')' or '')) end
     end
     if zigbeeDevices[d.ieee_address].friendly ~= friendly then zigbeeDevices[d.ieee_address].friendly = friendly modified = true end
@@ -465,23 +465,11 @@ local timeoutStart, connectStart, mqttConnected
 
 local changesChecked = socket.gettime()
 
--- Main loop: process commands
+-- Main loop: Process both C-Bus and Mosquitto broker messages
 while true do
-  -- Check for new messages from CBus. The entire socket buffer is collected each iteration for efficiency.
   local stat, err
-  local more = false
-  stat, err = pcall(function ()
-    ::checkAgain::
-    local cmd = nil
-    cmd = server:receive()
-    if cmd and type(cmd) == 'string' then
-      cbusMessages[#cbusMessages + 1] = cmd -- Queue the new message
-      server:settimeout(0); more = true; goto checkAgain -- Immediately check for more buffered inbound messages to queue
-    else
-      if more then server:settimeout(socketTimeout) end
-    end
-  end)
-  if not stat then log('Socket receive error: '..err) end
+
+  localbus:step()
 
   if mqttStatus == 1 then
     -- Process MQTT message buffers synchronously - sends and receives
@@ -499,7 +487,7 @@ while true do
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
     end
   elseif mqttStatus == 2 or not mqttStatus then
-    -- MQTT is disconnected, so attempt a connection, waiting. If fail to connect then retry.
+    -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
     if init then
       log('Connecting to Mosquitto broker')
       timeoutStart = socket.gettime()
@@ -509,29 +497,27 @@ while true do
     stat, err = pcall(function (b, p, k) client:connect(b, p, k) end, mqttBroker, 1883, 25) -- Requested keep-alive 25 seconds, broker at port 1883
     if not stat then -- Log and abort
       log('Error calling connect to broker: '..err)
-      pcall(function () server:close() end)
       do return end
     end
     while mqttStatus ~= 1 do
-      client:loop(1) -- Service the client with a generous timeout
+      client:loop(1) -- Service the client on startup with a generous timeout
       if socket.gettime() - connectStart > timeout then
         if socket.gettime() - timeoutStart > warningTimeout then
           log('Failed to connect to the Mosquitto broker, retrying continuously')
           timeoutStart = socket.gettime()
         end
         connectStart = socket.gettime()
-        goto next -- Exit to the main loop to keep socket messages monitored
+        goto next -- Exit to the main loop to keep localbus messages monitored
       end
     end
     mqttConnected = socket.gettime()
-    -- Subscribe to relevant topics
+    -- Subscribe to bridge topics
     client:subscribe(mqttTopic..'bridge/#', mqttQoS)
-    -- Connected... Now loop briefly to allow retained value retrieval for subscribed topics because synchronous
+    -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
     while socket.gettime() - mqttConnected < 0.5 do
       client:loop(0)
       if #mqttMessages > 0 then
-        -- Send outstanding messages to CBus
-        stat, err = pcall(outstandingMqttMessage)
+        stat, err = pcall(outstandingMqttMessage) -- Process outstanding bridge messages
         if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
       end
     end
@@ -541,21 +527,20 @@ while true do
     else -- Resubscribe
       local friendly
       for friendly, _ in pairs(subscribed) do
-        log(zigbeeName[friendly])
         ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
-        client:subscribe(mqttTopic..friendly, mqttQoS)
+        client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
+        if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
       end
     end
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
-    pcall(function () server:close() end)
     do return end
   end
 
   local t = socket.gettime()
-  if checkChanges and t > changesChecked then
+  if checkChanges and t > changesChecked + checkChanges then
     changesChecked = t
-    stat, err = pcall(cudZig) if not stat then log('Error publishing current values: '..err) end
+    stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
   end
 
   ::next::
