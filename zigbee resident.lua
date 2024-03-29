@@ -1,9 +1,11 @@
 --[[
-Resident script
+C-Bus integration for Zigbee2MQTT.
 
-Actually does the talking to zigbee2mqtt via MQTT.
+Update your Mosquitto broker address and credentials below.
 
-Update your MQTT credentials below:
+Required keywords for automation controller objects are described in the readme at https://github.com/geoffwatts/cbus2zigbee.
+
+Copyright (c) 2024, Geoff Watts. Subject to BSD 3-Clause License.
 --]]
 
 mqtt_broker = '192.168.1.1'
