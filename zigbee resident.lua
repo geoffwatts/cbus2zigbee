@@ -14,6 +14,7 @@ mqtt_password = ''
 mqtt_clientid = 'cbus2zigbee'
 local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
+local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, queue outstanding C-Bus to zigbee messages
 
 local logging = true
 
@@ -28,7 +29,7 @@ local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
 local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords, sensor, datatype, value }
 local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group }
-local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ expose=, type, alias, net, app, group } }
+local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposes, sensor={ {expose, type, alias, net, app, group}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
 local cbusMessages = {}     -- Message queue, inbound from C-Bus
@@ -140,9 +141,7 @@ Get key/value pairs, synonym and special parameters are optional
 local function getKeyValue(alias, tags, _L, synonym, special)
   if synonym == nil then synonym = {} end -- A table of { synonym = keyword, ... }
   if special == nil then special = {} end -- Special meaning keywords, initially { specialkw = false, ... }, set to true if the keyword is present
-  local dType = nil
   for k, t in pairs(tags) do
-    k = k:trim()
     if t ~= -1 then
       if synonym[k] then k = synonym[k] end
       if special[k] ~= nil then special[k] = true end
@@ -159,7 +158,6 @@ local function getKeyValue(alias, tags, _L, synonym, special)
       if special[k] ~= nil then special[k] = true end
     end
   end
-  return dType
 end
 
 
@@ -262,8 +260,9 @@ end
 Publish to MQTT
 --]]
 function publish(alias, level)
-  if not zigbee[alias].address then return end
-  if zigbee[alias].sensor then return end
+  if not zigbee[alias].address then return 2 end
+  if zigbee[alias].sensor then return 2 end
+  if not zigbeeDevices[zigbee[alias].address].available then if keepMessagesForOfflineQueued then return 1 else return 2 end end -- Device is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
   if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
     local max = zigbeeDevices[zigbee[alias].address].max
     if max ~= nil then
@@ -278,6 +277,7 @@ function publish(alias, level)
   local topic = mqttTopic..zigbeeDevices[zigbee[alias].address].friendly..'/set'
   if logging then log('Publish '..alias..' '..topic..', '..json.encode(msg)) end
   client:publish(topic, json.encode(msg), QoS, false)
+  return 0
 end
 
 
@@ -296,16 +296,17 @@ end
 Receive commands from C-Bus and publish to MQTT
 --]]
 function outstandingCbusMessage()
+  local keep = {}
   for _, cmd in ipairs(cbusMessages) do
     parts = cmd:split('/')
     alias = parts[1]..'/'..parts[2]..'/'..parts[3]
     if ignoreCbus[alias] then goto ignore end
     local level = tonumber(parts[4])
     local ramp = tonumber(parts[5]) -- Ignoring ramp for now
-    publish(alias, level)
+    if publish(alias, level) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
     ::ignore::
   end
-  cbusMessages = {}
+  cbusMessages = keep
 end
 
 
@@ -325,7 +326,7 @@ function updateDevices(payload)
     found[d.ieee_address] = true
     if zigbeeDevices[d.ieee_address] == nil then
       new = true
-      zigbeeDevices[d.ieee_address] = {}
+      zigbeeDevices[d.ieee_address] = { available=true } -- Initially available, updated on device topic subscribe if availability is configured
       if logging then log('Found a device '..d.ieee_address..(d.friendly_name ~= nil and ' (friendly name: '..d.friendly_name..')' or '')) end
     end
     if zigbeeDevices[d.ieee_address].friendly ~= friendly then zigbeeDevices[d.ieee_address].friendly = friendly modified = true end
