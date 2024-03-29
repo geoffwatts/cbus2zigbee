@@ -135,12 +135,11 @@ end
 
 
 --[[
-Get key/value pairs. Returns a keyword if found in 'allow'. (synonym, special and allow parameters are optional).
+Get key/value pairs, synonym and special parameters are optional
 --]]
-local function getKeyValue(alias, tags, _L, synonym, special, allow)
+local function getKeyValue(alias, tags, _L, synonym, special)
   if synonym == nil then synonym = {} end -- A table of { synonym = keyword, ... }
   if special == nil then special = {} end -- Special meaning keywords, initially { specialkw = false, ... }, set to true if the keyword is present
-  if allow == nil then allow = {} end     -- A table of keywords that are mutually exclusive, i.e. cannot be used together
   local dType = nil
   for k, t in pairs(tags) do
     k = k:trim()
@@ -158,9 +157,6 @@ local function getKeyValue(alias, tags, _L, synonym, special, allow)
     else
       if synonym[k] then k = synonym[k] end
       if special[k] ~= nil then special[k] = true end
-      if allow[k] then
-        if dType == nil then dType = k else error('Error: More than one "exclusive" keyword used for '..alias) end
-      end
     end
   end
   return dType
