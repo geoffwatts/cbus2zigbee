@@ -8,9 +8,9 @@ Required keywords for automation controller objects are described in the readme 
 Copyright (c) 2024, Geoff Watts. Subject to BSD 3-Clause License.
 --]]
 
-mqtt_broker = '192.168.1.1'
-mqtt_username = ''
-mqtt_password = ''
+mqttBroker = '192.168.1.1'
+mqttUsername = ''
+mqttPassword = ''
 local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, queue outstanding C-Bus to zigbee messages
@@ -467,6 +467,10 @@ function statusUpdate(friendly, payload)
             SetCBusLevel(s.net, s.app, s.group, value, 0)
           elseif s.app == 250 then -- User param
             SetUserParam(s.net, s.group, value)
+          elseif s.app == 228 then -- Measurement
+            local channelparts = s.alias:split('/')
+            local channel = channelparts[4]
+            SetCBusMeasurement(s.net, s.group, channel, value, 0)
           end
           zigbee[s.alias].value = value
         end
