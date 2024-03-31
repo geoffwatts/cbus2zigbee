@@ -35,14 +35,19 @@ Along with the keyword ZIGBEE, the available keywords to use are as follows, wit
 
 For Zigbee sensors, add the following:
 
-* sensor=exposes_name, to tie a C-Bus user parameter or lighting object to an exposed Zigbee value
+* light, to indicate a lighting object
+* switch, to indicate a switching object
+* sensor, to indicate a sensor object
+* exposed=exposes_name, to tie a C-Bus user parameter or lighting object to an exposed Zigbee value
 * type=number|boolean, to specify the data type ("number" is the default)
+* parameter=parameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object. The default is "parameter".
 
 ### Keyword Examples
 
-* ZIGBEE, z=0xa4c1389bf2e3ae5f, 
-* ZIGBEE, name=office/office desk strip, 
-* ZIGBEE, addr=0x00169a00022256da, sensor=humidity, 
+* ZIGBEE, light, z=0xa4c1389bf2e3ae5f, 
+* ZIGBEE, light, name=office/office desk strip, 
+* ZIGBEE, sensor, addr=0x00169a00022256da, exposed=humidity, 
+* ZIGBEE, switch, name=3way, exposed=state_l1, 
 
 ## Contributing
 
