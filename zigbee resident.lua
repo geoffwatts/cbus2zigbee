@@ -526,8 +526,8 @@ function statusUpdate(friendly, payload)
         if max ~= nil then
          if level == max then level = 255 end
         end
-        if logging then log('Set '..alias..' to '..level) end
         if grp.getvalue(alias) ~= level then
+          if logging then log('Set '..alias..' to '..level) end
           ignoreCbus[alias] = true
           SetCBusLevel(net, app, group, level, 0)
           zigbee[alias].value = level
