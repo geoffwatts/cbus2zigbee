@@ -441,7 +441,7 @@ function updateDevices(payload)
           if e.features and type(d.features) ~= 'userdata' then
             for _, f in ipairs(e.features) do
               if f.name == 'brightness' then
-                zigbeeDevices[d.ieee_address].max = value_max
+                zigbeeDevices[d.ieee_address].max = f.value_max
               end
             end
           end
