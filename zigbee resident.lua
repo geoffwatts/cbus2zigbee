@@ -44,6 +44,15 @@ local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in 
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
+-- Runtime global variable checking. Globals must be explicitly declared, which will catch variable name typos
+local declaredNames = { vprint = true, vprinthex = true, maxgroup = true, mosquitto = true, rr = true, _ = true, }
+local function declare(name, initval) rawset(_G, name, initval) declaredNames[name] = true end
+local exclude = { ngx = true, }
+setmetatable(_G, {
+  __newindex = function (t, n, v) if not declaredNames[n] then log('Warning: Write to undeclared global variable "'..n..'"') end rawset(t, n, v) end,
+  __index = function (_, n) if not exclude[n] and not declaredNames[n] then log('Warning: Read undeclared global variable "'..n..'"') end return nil end,
+})
+
 local function removeIrrelevant(keywords)
   local curr = {}
   for _, k in ipairs(keywords:split(',')) do
@@ -230,7 +239,7 @@ local function cudZig()
         return true
       end
 
-      allow = {
+      local allow = {
         light = {setup = function ()
             zigbee[alias].address = _L.z
           end
@@ -289,7 +298,7 @@ local function cudZig()
         local friendly = zigbeeDevices[_L.z].friendly
         if not subscribed[friendly] or dType == 'sensor' then
           if dType ~= 'sensor' then ignoreMqtt[alias] = true end
-          client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
+          client:subscribe(mqttTopic..friendly..'/#', QoS)
           subscribed[friendly] = true
           if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
         end
@@ -393,8 +402,8 @@ function outstandingCbusMessage()
   local keep = {}
   local level, ramp
   for _, cmd in ipairs(cbusMessages) do
-    parts = cmd:split('/')
-    alias = parts[1]..'/'..parts[2]..'/'..parts[3]
+    local parts = cmd:split('/')
+    local alias = parts[1]..'/'..parts[2]..'/'..parts[3]
     if parts[2] == '228' then
       alias = alias..'/'..parts[4]
       level = tonumber(parts[5])
@@ -548,7 +557,7 @@ Send commands subscribed from MQTT to C-Bus
 --]]
 function outstandingMqttMessage()
   for _, msg in ipairs(mqttMessages) do
-    parts = msg.topic:split('/')
+    local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
       if parts[3] == 'devices' then updateDevices(msg.payload)
       elseif parts[3] == 'groups' then updateGroups(msg.payload)
@@ -619,12 +628,12 @@ while true do
   elseif mqttStatus == 2 or not mqttStatus then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
     if bridgeSubscribed then
-      client:unsubscribe(mqttTopic..'bridge/#', mqttQoS)
+      client:unsubscribe(mqttTopic..'bridge/#', QoS)
       bridgeSubscribed = false
     if logging then log('Unsubscribed '..mqttTopic..'bridge/#') end
     end
     for friendly, _ in pairs(subscribed) do
-      client:unsubscribe(mqttTopic..friendly..'/#', mqttQoS)
+      client:unsubscribe(mqttTopic..friendly..'/#', QoS)
       if logging then log('Unubscribed '..mqttTopic..friendly..'/#') end
       table.insert(onReconnect, friendly)
       subscribed[friendly] = nil
@@ -653,7 +662,7 @@ while true do
     end
     mqttConnected = socket.gettime()
     -- Subscribe to bridge topics
-    client:subscribe(mqttTopic..'bridge/#', mqttQoS)
+    client:subscribe(mqttTopic..'bridge/#', QoS)
     if logging then log('Subscribed '..mqttTopic..'bridge/#') end
     bridgeSubscribed = true
     -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
@@ -671,7 +680,7 @@ while true do
       local friendly
       for _, friendly in ipairs(onReconnect) do
         ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
-        client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
+        client:subscribe(mqttTopic..friendly..'/#', QoS)
         subscribed[friendly] = true
         if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
       end
