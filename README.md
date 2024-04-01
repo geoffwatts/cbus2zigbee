@@ -4,7 +4,7 @@
 
 This project provides integration between Clipsal C-Bus automation controllers and Zigbee2MQTT.
 
-The integration consists of a single resident script, which listens for both C-Bus level changes and Mosquitto broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects. Lighting group and user parameters are implemented.
+The integration consists of a single resident script, which listens for both C-Bus level changes and Mosquitto broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects. Lighting group, measurement app and user parameters are implemented.
 
 ## Setup
 
@@ -38,7 +38,7 @@ For Zigbee sensors, add the following:
 * light, to indicate a lighting object
 * switch, to indicate a switching object
 * sensor, to indicate a sensor object
-* exposed=exposes_name, to tie a C-Bus user parameter or lighting object to an exposed Zigbee value
+* exposed=exposes_name, to tie a C-Bus user parameter, measurement or lighting object to an exposed Zigbee value
 * type=number|boolean, to specify the data type ("number" is the default)
 * parameter=parameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object. The default is "parameter".
 
