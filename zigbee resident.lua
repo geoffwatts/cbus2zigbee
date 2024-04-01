@@ -284,8 +284,8 @@ local function cudZig()
 
         zigbee[alias].value = grp.getvalue(alias)
         local friendly = zigbeeDevices[_L.z].friendly
-        if not subscribed[friendly] then
-          ignoreMqtt[alias] = true
+        if not subscribed[friendly] or dType == 'sensor' then
+          if dType ~= 'sensor' then ignoreMqtt[alias] = true end
           client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
           subscribed[friendly] = true
           if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
