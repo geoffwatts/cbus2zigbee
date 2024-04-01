@@ -4,7 +4,7 @@
 
 This project provides integration between Clipsal C-Bus automation controllers and Zigbee2MQTT.
 
-The integration consists of a single resident script, which listens for both C-Bus level changes and Mosquitto broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects. Lighting group and user parameters are implemented.
+The integration consists of a single resident script, which listens for both C-Bus level changes and Mosquitto broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects. Lighting group, measurement app and user parameters are implemented.
 
 ## Setup
 
@@ -33,14 +33,14 @@ Along with the keyword ZIGBEE, the available keywords to use are as follows, wit
 ... or
 * z=0x12345678abcdef123, to use the IEEE address of the Zigbee device, which should be used where a friendly name is not defined, or if one is defined and z= is used then the friendly name will be looked up. (addr= is an alias.)
 
-For Zigbee sensors, add the following:
+Add the following:
 
-* light, to indicate a lighting object
+* light, to indicate a lighting object (the default type)
 * switch, to indicate a switching object
 * sensor, to indicate a sensor object
-* exposed=exposes_name, to tie a C-Bus user parameter or lighting object to an exposed Zigbee value
-* type=number|boolean, to specify the data type ("number" is the default)
-* parameter=parameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object. The default is "parameter".
+* exposed=exposes_name, to tie a C-Bus user parameter, measurement or lighting object to an exposed Zigbee value (not required for light)
+* type=number|boolean, to specify the data type ("number" is the default, not required for light)
+* parameter=parameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object (the default is "parameter", not required for light)
 
 ### Keyword Examples
 

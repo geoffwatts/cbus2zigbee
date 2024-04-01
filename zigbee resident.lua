@@ -27,9 +27,9 @@ local init = true           -- Broker initialise
 local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
-local zigbee = {}           -- Key is C-Bus alias, contains { name, net, app, group, keywords, sensor, datatype, value }
-local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group }
-local zigbeeDevices = {}    -- Key is IEEE-address, contains { friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group}, ... } }
+local zigbee = {}           -- Key is C-Bus alias, contains { class, address, name, net, app, group, channel, keywords, exposed, datatype, value }
+local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group, channel }
+local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
 local cbusMessages = {}     -- Message queue, inbound from C-Bus
@@ -37,13 +37,11 @@ local mqttMessages = {}     -- Message queue, inbound from Mosquitto
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
 
+local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
+
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
   'ZIGBEE', 'light', 'switch', 'sensor', 'name=', 'n=', 'addr=', 'z=', 'type=', 'exposed=', 'property=', 
 }
-
-local cbusMeasurementUnits = {['temperature']=0,['humidity']=0x1a,['current']=1,['frequency']=7,['voltage']=0x24,['power']=0x26,['energy']=0x25}
-
-
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
 local function removeIrrelevant(keywords)
@@ -185,13 +183,12 @@ local function cudZig()
   local special = {} -- special use keywords, e.g. { noavailqueue=true, }
 
   for alias, v in pairs(grps) do
-    local datatype = grp.find(alias).datatype
     local modification = false
     found[alias] = true
     local curr = removeIrrelevant(v.keywords)
     if zigbee[alias] and zigbee[alias].keywords ~= curr then modification = true end
     if not zigbee[alias] or modification then
-      zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, keywords=curr, datatype=datatype } 
+      zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, channel=v.channel, keywords=curr, datatype=grp.find(alias).datatype } 
       local _L = {
         n = '',
         z = '',
@@ -205,7 +202,7 @@ local function cudZig()
         local exposes = {}
         local function getProps(tbl)
           local val
-	        for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[_L.property] then exposes[val[_L.property]] = true end end end
+          for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[_L.property] then exposes[val[_L.property]] = true end end end
         end
         getProps(zigbeeDevices[_L.z].exposesRaw)
         return exposes
@@ -239,7 +236,7 @@ local function cudZig()
             zigbee[alias].address = _L.z
             if setupExposed() then
               if not zigbeeDevices[_L.z].exposed then
-                zigbeeDevices[_L.z].exposed = { { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, }, }
+                zigbeeDevices[_L.z].exposed = { { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group }, }
               else
                 table.insert(zigbeeDevices[_L.z].exposed, { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, })
               end
@@ -252,9 +249,9 @@ local function cudZig()
             zigbee[alias].address = _L.z
             if setupExposed() then
               if not zigbeeDevices[_L.z].exposed then
-                zigbeeDevices[_L.z].exposed = { { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, }, }
+                zigbeeDevices[_L.z].exposed = { { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, }, }
               else
-                table.insert(zigbeeDevices[_L.z].exposed, { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, })
+                table.insert(zigbeeDevices[_L.z].exposed, { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, })
               end
               zigbee[alias].exposed = _L.exposed
             end
@@ -282,12 +279,13 @@ local function cudZig()
           goto next
         end
 
+        log('Adding '..dType..' '..alias..' Zigbee '.._L.z..((zigbee[alias].exposed and ', exposed '..zigbee[alias].exposed) or ''))
         zigbeeDevices[_L.z].class = dType
 
         zigbee[alias].value = grp.getvalue(alias)
         local friendly = zigbeeDevices[_L.z].friendly
-        if not subscribed[friendly] then
-          ignoreMqtt[alias] = true
+        if not subscribed[friendly] or dType == 'sensor' then
+          if dType ~= 'sensor' then ignoreMqtt[alias] = true end
           client:subscribe(mqttTopic..friendly..'/#', mqttQoS)
           subscribed[friendly] = true
           if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
@@ -295,19 +293,40 @@ local function cudZig()
 
       end
       ::next::
-      zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, }
+      zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, }
     end
   end
 
   -- Handle deletions
   for k, v in pairs(zigbee) do
     if not found[k] then
-      local name = v.name
-      local address = k.address
-      if name ~= nil and address ~= nil then log('Removing '..k..' Zigbee '..v.name) zigbeeAddress[address] = nil zigbee[k] = nil remCount = remCount + 1 end
-      if address ~= nil then
-        client:unsubscribe(mqttTopic..address)
-        subscribed[address] = nil
+      local exposed = v.exposed
+      local address = v.address
+      local unsub = false
+      if exposed then
+        local i, exp
+        for i, exp in pairs(zigbeeDevices[address].exposed) do
+          if exposed == exp.expose then
+            log('Removing '..k..' Zigbee '..address..', exposed '..exposed)
+            zigbeeDevices[address].exposed[i] = nil
+            zigbee[k] = nil remCount = remCount + 1
+          end
+        end
+        if #zigbeeDevices[address].exposed == 0 then -- If there is nothing more exposed for the device then unsubscribe and remove it
+          unsub = true
+        end
+      else
+        if address ~= nil then
+          log('Removing '..k..' Zigbee '..address)
+          zigbee[k] = nil remCount = remCount + 1
+          unsub = true
+        end
+      end
+      if unsub then
+        zigbeeAddress[address] = nil
+        client:unsubscribe(mqttTopic..address..'/#')
+        subscribed[zigbeeDevices[address].friendly] = nil
+        if logging then log('Unsubscribed '..mqttTopic..zigbeeDevices[address].friendly..'/#') end
       end
     end
   end
@@ -369,14 +388,23 @@ Receive commands from C-Bus and publish to MQTT
 --]]
 function outstandingCbusMessage()
   local keep = {}
+  local level, ramp
   for _, cmd in ipairs(cbusMessages) do
     parts = cmd:split('/')
     alias = parts[1]..'/'..parts[2]..'/'..parts[3]
-    if ignoreCbus[alias] then goto ignore end
-    local level = tonumber(parts[4])
-    local ramp = tonumber(parts[5]) -- Ignoring ramp for now
-    if publish(alias, level) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
-    ::ignore::
+    if parts[2] == '228' then
+      alias = alias..'/'..parts[4]
+      level = tonumber(parts[5])
+      ramp = tonumber(parts[6])
+    else
+      level = tonumber(parts[4])
+      ramp = tonumber(parts[5]) -- Ignoring ramp for now
+    end
+    if ignoreCbus[alias] then
+      ignoreCbus[alias] = nil
+    else
+      if publish(alias, level) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
+    end
   end
   cbusMessages = keep
 end
@@ -464,7 +492,7 @@ function statusUpdate(friendly, payload)
       local value = payload[s.expose]
       if s.type == 'boolean' then value = value and 1 or 0 end
       if value then
-        if grp.getvalue(s.alias) ~= value then
+        if string.format('%.5f', grp.getvalue(s.alias)) ~= string.format('%.5f', value) then
           if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
           ignoreCbus[s.alias] = true
           if lighting[tostring(s.app)] then -- Lighting group sensor
@@ -472,9 +500,7 @@ function statusUpdate(friendly, payload)
           elseif s.app == 250 then -- User param
             SetUserParam(s.net, s.group, value)
           elseif s.app == 228 then -- Measurement
-            local channelparts = s.alias:split('/')
-            local channel = channelparts[4]
-            SetCBusMeasurement(s.net, s.group, channel, value, cbusMeasurementUnits[s.expose] or 0)
+            SetCBusMeasurement(s.net, s.group, s.channel, value, cbusMeasurementUnits[s.expose] or 0)
           end
           zigbee[s.alias].value = value
         end
