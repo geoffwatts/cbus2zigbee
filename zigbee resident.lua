@@ -37,7 +37,7 @@ local mqttMessages = {}     -- Message queue, inbound from Mosquitto
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
 
-local cbusMeasurementUnits = {['temperature']=0,['humidity']=0x1a,['current']=1,['frequency']=7,['voltage']=0x24,['power']=0x26,['energy']=0x25}
+local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
 
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
   'ZIGBEE', 'light', 'switch', 'sensor', 'name=', 'n=', 'addr=', 'z=', 'type=', 'exposed=', 'property=', 
