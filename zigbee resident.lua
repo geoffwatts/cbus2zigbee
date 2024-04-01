@@ -95,7 +95,10 @@ local function eventCallback(event)
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
     local ramp = tonumber(string.sub(event.datahex,5,8),16)
-    if ramp > 0 then if value ~= target then return end end
+    if ramp > 0 then
+      if event.meta == 'admin' then return end -- Ignore messages that precede a ramp
+      if value ~= target then return end
+    end
   else
     value = grp.getvalue(event.dst)
   end
