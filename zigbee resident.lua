@@ -492,7 +492,7 @@ function statusUpdate(friendly, payload)
       local value = payload[s.expose]
       if s.type == 'boolean' then value = value and 1 or 0 end
       if value then
-        if grp.getvalue(s.alias) ~= value then
+        if string.format('%.5f', grp.getvalue(s.alias)) ~= string.format('%.5f', value) then
           if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
           ignoreCbus[s.alias] = true
           if lighting[tostring(s.app)] then -- Lighting group sensor
