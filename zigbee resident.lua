@@ -87,6 +87,8 @@ C-Bus events, only queues a C-Bus message at the end of a ramp
 --]]
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
+  if event.sender == "cb" then ignoreCbus[event.dst] = nil end -- Always clear the ignorecbus flag when a message arrives from cbus rather than locally
+  
   -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This will return nil, as I don't think decode works for AC use
   local value
   local ramp = 0
