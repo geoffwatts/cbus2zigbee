@@ -32,7 +32,7 @@ local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, 
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
-local cbusMessages = {}     -- Message queue, inbound from C-Bus
+local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp, }
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
@@ -93,7 +93,7 @@ end
 
 
 --[[
-C-Bus events, only queues a C-Bus message at the end of a ramp
+C-Bus events (queues transitions at the start of a ramp, with status queued also at the target level)
 --]]
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
@@ -105,20 +105,21 @@ local function eventCallback(event)
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
-    local ramp = tonumber(string.sub(event.datahex,5,8),16)
-    if ramp > 0 then
-      if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition
-        cbusMessages[#cbusMessages + 1] = event.dst.."/"..target.."/"..origin.."/"..ramp -- Queue the event
+    if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition
+      ramp = tonumber(string.sub(event.datahex,5,8),16)
+      if ramp > 0 then
+        cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
         return
       end
-      if value ~= target then return end -- Ignore level changes during a ramp
     end
+    if value ~= target then return end -- Ignore level changes during a ramp
   else
     value = grp.getvalue(event.dst)
   end
   if value == zigbee[event.dst].value then return end -- Don't publish if already at the level, avoids publishing twice when a ramp occurs
   zigbee[event.dst].value = value
-  cbusMessages[#cbusMessages + 1] = event.dst.."/"..value.."/"..origin.."/"..ramp -- Queue the event
+  cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=ramp, } -- Queue the event
+  suppressMqttUpdates[event.dst] = nil
 end
 
 local localbus = require('localbus').new(busTimeout) -- Set up the localbus
@@ -379,7 +380,7 @@ local function publish(alias, level, origin, ramp)
     end
     if ramp > 0 then
       duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
-      suppressMqttUpdates[alias] = socket.gettime() + duration
+      suppressMqttUpdates[alias] = socket.gettime() + duration + 1
     else
       duration = nil
     end
@@ -418,21 +419,10 @@ local function outstandingCbusMessage()
   local keep = {}
   local level, origin, ramp
   for _, cmd in ipairs(cbusMessages) do
-    local parts = cmd:split('/')
-    local alias = parts[1]..'/'..parts[2]..'/'..parts[3]
-    if parts[2] == '228' then
-      alias = alias..'/'..parts[4]
-      level = tonumber(parts[5])
-      ramp = 0
+    if ignoreCbus[cmd.alias] then
+      ignoreCbus[cmd.alias] = nil
     else
-      level = tonumber(parts[4]) -- The target level
-      origin = tonumber(parts[5]) -- The originating level
-      ramp = tonumber(parts[6]) -- The ramp rate
-    end
-    if ignoreCbus[alias] then
-      ignoreCbus[alias] = nil
-    else
-      if publish(alias, level, origin, ramp) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
+      if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
     end
   end
   cbusMessages = keep
