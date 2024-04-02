@@ -97,7 +97,6 @@ C-Bus events (queues transitions at the start of a ramp, with status queued also
 --]]
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
-  -- local value = dpt.decode(event.datahex, zigbee[event.dst].datatype) -- This will return nil, as I don't think decode works for AC use
   local value
   local origin = zigbee[event.dst].value
   local ramp = 0
@@ -105,18 +104,18 @@ local function eventCallback(event)
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
-    if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition
+    if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
       ramp = tonumber(string.sub(event.datahex,5,8),16)
       if ramp > 0 then
         cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
         return
       end
     end
-    if value ~= target then return end -- Ignore level changes during a ramp
+    if value ~= target then return end -- Ignore intermediate level changes during a ramp
   else
     value = grp.getvalue(event.dst)
   end
-  if value == zigbee[event.dst].value then return end -- Don't publish if already at the level, avoids publishing twice when a ramp occurs
+  if value == zigbee[event.dst].value then return end -- Don't publish if already at the level
   zigbee[event.dst].value = value
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=ramp, } -- Queue the event
   suppressMqttUpdates[event.dst] = nil
