@@ -32,11 +32,11 @@ local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, 
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
-local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp, }
-local mqttMessages = {}     -- Message queue, inbound from Mosquitto
+local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
+local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
-local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions
+local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, contains expected completion timestamp
 
 local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
 
@@ -348,10 +348,8 @@ local function cudZig()
       end
     end
   end
-  if remCount > 0 then
-    log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or ''))
-  end
-  -- Log it, and restart scripts if appropriate
+  -- Log the summary
+  if remCount > 0 then log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or '')) end
   if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')) end
   if modCount > 0 then log('Modified '..modCount..' Zigbee object'..(modCount ~= 1 and 's' or '')) end
 end
@@ -380,7 +378,7 @@ local function publish(alias, level, origin, ramp)
     end
     if ramp > 0 then
       duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
-      suppressMqttUpdates[alias] = socket.gettime() + duration + 1
+      suppressMqttUpdates[alias] = socket.gettime() + duration + 1 -- Expected completion time with a small buffer
     else
       duration = nil
     end
@@ -417,7 +415,6 @@ Receive commands from C-Bus and publish to MQTT
 --]]
 local function outstandingCbusMessage()
   local keep = {}
-  local level, origin, ramp
   for _, cmd in ipairs(cbusMessages) do
     if ignoreCbus[cmd.alias] then
       ignoreCbus[cmd.alias] = nil
