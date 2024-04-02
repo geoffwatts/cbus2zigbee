@@ -253,26 +253,27 @@ local function cudZig()
         switch = {setup = function ()
             zigbee[alias].address = _L.z
             if setupExposed() then
-              if not zigbeeDevices[_L.z].exposed then
-                zigbeeDevices[_L.z].exposed = { { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group }, }
-              else
-                table.insert(zigbeeDevices[_L.z].exposed, { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, })
-              end
+              if not zigbeeDevices[_L.z].exposed then zigbeeDevices[_L.z].exposed = {} end
+              local found = false for _, e in ipairs(zigbeeDevices[_L.z].exposed) do if e.expose == _L.exposed then found = true break end end
+              if not found then zigbeeDevices[_L.z].exposed[#zigbeeDevices[_L.z].exposed + 1] = { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, } end
               zigbee[alias].exposed = _L.exposed
+            else
+              return false
             end
+            return true
           end
         },
         sensor = {setup = function ()
-            zigbee[alias].sensor = true
             zigbee[alias].address = _L.z
             if setupExposed() then
-              if not zigbeeDevices[_L.z].exposed then
-                zigbeeDevices[_L.z].exposed = { { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, }, }
-              else
-                table.insert(zigbeeDevices[_L.z].exposed, { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, })
-              end
+              if not zigbeeDevices[_L.z].exposed then zigbeeDevices[_L.z].exposed = {} end
+              local found = false for _, e in ipairs(zigbeeDevices[_L.z].exposed) do if e.expose == _L.exposed then found = true break end end
+              if not found then zigbeeDevices[_L.z].exposed[#zigbeeDevices[_L.z].exposed + 1] = { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, } end
               zigbee[alias].exposed = _L.exposed
+            else
+              return false
             end
+            return true
           end
         },
       }
@@ -291,7 +292,7 @@ local function cudZig()
         log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
       else
         if zigbeeDevices[_L.z] ~= nil then
-          allow[dType].setup()
+          if not allow[dType].setup() then goto next end
         else
           log('Error, device '..alias..', '.._L.z..' does not exist')
           goto next
