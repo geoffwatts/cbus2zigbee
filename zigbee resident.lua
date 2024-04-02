@@ -108,7 +108,7 @@ local function eventCallback(event)
     local ramp = tonumber(string.sub(event.datahex,5,8),16)
     if ramp > 0 then
       if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition
-        cbusMessages[#cbusMessages + 1] = event.dst.."/"..value.."/"..origin.."/"..ramp -- Queue the event
+        cbusMessages[#cbusMessages + 1] = event.dst.."/"..target.."/"..origin.."/"..ramp -- Queue the event
         return
       end
       if value ~= target then return end -- Ignore level changes during a ramp
@@ -359,7 +359,7 @@ end
 --[[
 Publish to MQTT
 --]]
-function publish(alias, level, origin, ramp)
+local function publish(alias, level, origin, ramp)
   if not zigbee[alias].address then return 2 end
   if zigbee[alias].class == 'sensor' then return 2 end
   if not zigbeeDevices[zigbee[alias].address].available then if keepMessagesForOfflineQueued then return 1 else return 2 end end -- Device is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
@@ -367,7 +367,7 @@ function publish(alias, level, origin, ramp)
   local msg
   if zigbee[alias].class == 'switch' then
     msg = {
-      [zigbee[alias].exposed] = (level ~= 0) and "ON" or "OFF",
+      [zigbee[alias].exposed] = (level ~= 0) and 'ON' or 'OFF',
     }
   else
     local duration
@@ -383,9 +383,11 @@ function publish(alias, level, origin, ramp)
     else
       duration = nil
     end
+    local state = (level ~= 0) and 'ON' or 'OFF'
+    if duration ~= nil and duration > 0 and level == 0 then state = nil end
     msg = {
       brightness = level,
-      state = (level ~= 0) and "ON" or "OFF",
+      state = state,
       transition = duration,
     }
   end
@@ -400,7 +402,7 @@ end
 --[[
 Publish current level and state to MQTT
 --]]
-function publishCurrent()
+local function publishCurrent()
   local alias, v
   for alias, v in pairs(zigbee) do
     local level = grp.getvalue(alias)
@@ -412,9 +414,9 @@ end
 --[[
 Receive commands from C-Bus and publish to MQTT
 --]]
-function outstandingCbusMessage()
+local function outstandingCbusMessage()
   local keep = {}
-  local level, ramp
+  local level, origin, ramp
   for _, cmd in ipairs(cbusMessages) do
     local parts = cmd:split('/')
     local alias = parts[1]..'/'..parts[2]..'/'..parts[3]
@@ -440,7 +442,7 @@ end
 --[[
 Available devices has changed
 --]]
-function updateDevices(payload)
+local function updateDevices(payload)
   local d, e, f, new, modified
   local found = {}
   local kill = {}
@@ -485,14 +487,14 @@ end
 --[[
 Available groups has changed
 --]]
-function updateGroups(payload)
+local function updateGroups(payload)
 end
 
 
 --[[
 A device has updated status, so send to C-Bus
 --]]
-function statusUpdate(friendly, payload)
+local function statusUpdate(friendly, payload)
   local device
   if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
   if not device then return end
@@ -570,7 +572,7 @@ end
 --[[
 Send commands subscribed from MQTT to C-Bus
 --]]
-function outstandingMqttMessage()
+local function outstandingMqttMessage()
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
