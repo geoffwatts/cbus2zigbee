@@ -248,6 +248,7 @@ local function cudZig()
       local allow = {
         light = {setup = function ()
             zigbee[alias].address = _L.z
+            return true
           end
         },
         switch = {setup = function ()
