@@ -37,6 +37,7 @@ local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains a
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, contains expected completion timestamp
+local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
 
 local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
 
@@ -58,7 +59,7 @@ local function removeIrrelevant(keywords)
   local curr = {}
   for _, k in ipairs(keywords:split(',')) do
     local parts = k:split('=') if parts[2] ~= nil then parts[1] = parts[1]:trim()..'=' end
-    if cudAll[parts[1]] then table.insert(curr, k) end
+    if cudAll[parts[1]] then curr[#curr + 1] = k end
   end
   return table.concat(curr, ',')
 end
@@ -99,13 +100,12 @@ local function eventCallback(event)
   if not zigbee[event.dst] then return end
   local value
   local origin = zigbee[event.dst].value
-  local ramp = 0
+  local ramp = tonumber(string.sub(event.datahex,5,8),16)
   local parts = string.split(event.dst, '/')
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
     if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
-      ramp = tonumber(string.sub(event.datahex,5,8),16)
       if ramp > 0 then
         cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
         return
@@ -117,8 +117,8 @@ local function eventCallback(event)
   end
   if value == zigbee[event.dst].value then return end -- Don't publish if already at the level
   zigbee[event.dst].value = value
-  cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=ramp, } -- Queue the event
-  suppressMqttUpdates[event.dst] = nil
+  cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
+  if ramp > 0 then clearMqttSuppress[event.dst] = true end -- Clear suppression because at final level
 end
 
 local localbus = require('localbus').new(busTimeout) -- Set up the localbus
@@ -360,9 +360,14 @@ end
 Publish to MQTT
 --]]
 local function publish(alias, level, origin, ramp)
-  if not zigbee[alias].address then return 2 end
-  if zigbee[alias].class == 'sensor' then return 2 end
-  if not zigbeeDevices[zigbee[alias].address].available then if keepMessagesForOfflineQueued then return 1 else return 2 end end -- Device is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
+  if not zigbee[alias].address then return false end
+  if zigbee[alias].class == 'sensor' then return false end
+  if not zigbeeDevices[zigbee[alias].address].available then if keepMessagesForOfflineQueued then return 'retain' else return false end end -- Device is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
+
+  if clearMqttSuppress[alias] then
+    suppressMqttUpdates[alias] = nil
+    return true
+  end
 
   local msg
   if zigbee[alias].class == 'switch' then
@@ -395,7 +400,7 @@ local function publish(alias, level, origin, ramp)
   local topic = mqttTopic..zigbeeDevices[zigbee[alias].address].friendly..'/set'
   if logging then log('Publish '..alias..' '..topic..', '..json.encode(msg)) end
   client:publish(topic, json.encode(msg), QoS, false)
-  return 0
+  return true
 end
 
 
@@ -403,11 +408,13 @@ end
 Publish current level and state to MQTT
 --]]
 local function publishCurrent()
+  local keep = {}
   local alias, v
   for alias, v in pairs(zigbee) do
     local level = grp.getvalue(alias)
-    publish(alias, level, level, 0)
+    if publish(alias, level, level, 0) == 'retain' then keep[#keep+1] = cmd end
   end
+  cbusMessages = keep
 end
 
 
@@ -420,7 +427,7 @@ local function outstandingCbusMessage()
     if ignoreCbus[cmd.alias] then
       ignoreCbus[cmd.alias] = nil
     else
-      if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 1 then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
+      if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
     end
   end
   cbusMessages = keep
@@ -575,7 +582,7 @@ local function outstandingMqttMessage()
       if parts[#parts] == 'availability' then
         local avail = false
         local e = #parts - 1
-        for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
+        for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/')
         if type(msg.payload) == 'string' then -- Legacy mode
           avail = msg.payload == 'online'
         else
@@ -587,11 +594,10 @@ local function outstandingMqttMessage()
       elseif parts[#parts] == 'get' then -- Do nothing
       else -- Status update
         local e = #parts
-        for i = s, e do table.insert(friendly, parts[i]) end friendly = table.concat(friendly, '/')
-        local alias = zigbeeAddress[zigbeeName[friendly]].alias
-        if not ignoreMqtt[alias] then
-          if not suppressMqttUpdates[alias] then statusUpdate(friendly, msg.payload) end
-        else
+        for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/')
+        if zigbeeName[friendly] then
+          local alias = zigbeeAddress[zigbeeName[friendly]].alias
+          if not ignoreMqtt[alias] and not suppressMqttUpdates[alias] then statusUpdate(friendly, msg.payload) end
           ignoreMqtt[alias] = nil
         end
       end
@@ -609,6 +615,8 @@ local onReconnect = {}
 local bridgeSubscribed = false
 
 local changesChecked = socket.gettime()
+local reportOutstandingEvery = 300 -- If there are outstanding C-Bus messages in the queue, log at intervals (if logging is enabled)
+local outstandingLogged = socket.gettime() - reportOutstandingEvery
 
 -- Main loop: Process both C-Bus and Mosquitto broker messages
 while true do
@@ -628,6 +636,10 @@ while true do
       -- Send outstanding messages to MQTT
       stat, err = pcall(outstandingCbusMessage)
       if not stat then log('Error processing outstanding CBus messages: '..err) cbusMessages = {} end -- Log error and clear the queue, continue
+      if logging and #cbusMessages > 0 and socket.gettime() - outstandingLogged > reportOutstandingEvery then
+        outstandingLogged = socket.gettime()
+        log(#cbusMessages..' outstanding message'..(#cbusMessages > 1 and 's' or '')..', device(s) are offline')
+      end
     end
 
     if #mqttMessages > 0 then
@@ -645,7 +657,7 @@ while true do
     for friendly, _ in pairs(subscribed) do
       client:unsubscribe(mqttTopic..friendly..'/#', QoS)
       if logging then log('Unubscribed '..mqttTopic..friendly..'/#') end
-      table.insert(onReconnect, friendly)
+      onReconnect[#onReconnect + 1] = friendly
       subscribed[friendly] = nil
     end
     if init then
@@ -686,6 +698,7 @@ while true do
     if not reconnect then -- Full publish topics
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
       stat, err = pcall(publishCurrent) if not stat then log('Error publishing current values: '..err) end -- Log and continue
+      outstandingLogged = socket.gettime()
     else -- Resubscribe
       local friendly
       for _, friendly in ipairs(onReconnect) do
