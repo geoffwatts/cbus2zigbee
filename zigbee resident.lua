@@ -28,7 +28,7 @@ local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
 local zigbee = {}           -- Key is C-Bus alias, contains { class, address, name, net, app, group, channel, keywords, exposed, datatype, value }
-local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group, channel }
+local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group, channel }, the in-use Zigbee devices (zigbeeDevices contains all discovered devices)
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
@@ -241,6 +241,10 @@ local function cudZig()
           log('Keyword error, device '..alias..', '.._L.z..' has no '.._L.exposed..' exposed')
           return false
         end
+
+        if not zigbeeDevices[_L.z].exposed then zigbeeDevices[_L.z].exposed = {} end
+        local found = false for _, e in ipairs(zigbeeDevices[_L.z].exposed) do if e.expose == _L.exposed then found = true break end end
+        if not found then zigbeeDevices[_L.z].exposed[#zigbeeDevices[_L.z].exposed + 1] = { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, } end
         return true
       end
 
@@ -252,27 +256,13 @@ local function cudZig()
         },
         switch = {setup = function ()
             zigbee[alias].address = _L.z
-            if setupExposed() then
-              if not zigbeeDevices[_L.z].exposed then zigbeeDevices[_L.z].exposed = {} end
-              local found = false for _, e in ipairs(zigbeeDevices[_L.z].exposed) do if e.expose == _L.exposed then found = true break end end
-              if not found then zigbeeDevices[_L.z].exposed[#zigbeeDevices[_L.z].exposed + 1] = { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, } end
-              zigbee[alias].exposed = _L.exposed
-            else
-              return false
-            end
+            if not setupExposed() then return false end
             return true
           end
         },
         sensor = {setup = function ()
             zigbee[alias].address = _L.z
-            if setupExposed() then
-              if not zigbeeDevices[_L.z].exposed then zigbeeDevices[_L.z].exposed = {} end
-              local found = false for _, e in ipairs(zigbeeDevices[_L.z].exposed) do if e.expose == _L.exposed then found = true break end end
-              if not found then zigbeeDevices[_L.z].exposed[#zigbeeDevices[_L.z].exposed + 1] = { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, } end
-              zigbee[alias].exposed = _L.exposed
-            else
-              return false
-            end
+            if not setupExposed() then return false end
             return true
           end
         },
@@ -629,6 +619,12 @@ while true do
   for alias, finish in pairs(suppressMqttUpdates) do if socket.gettime() > finish then suppressMqttUpdates[alias] = nil if logging then log('Expired transition for '..alias) end end end
   
   if mqttStatus == 1 then
+    local t = socket.gettime()
+    if checkChanges and t > changesChecked + checkChanges then
+      changesChecked = t
+      stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
+    end
+
     -- Process MQTT message buffers synchronously - sends and receives
     client:loop(mqttTimeout)
 
@@ -712,12 +708,6 @@ while true do
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
     do return end
-  end
-
-  local t = socket.gettime()
-  if checkChanges and t > changesChecked + checkChanges then
-    changesChecked = t
-    stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
   end
 
   ::next::
