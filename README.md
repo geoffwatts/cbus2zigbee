@@ -28,19 +28,19 @@ The integration consists of a single resident script, which listens for both C-B
 
 Along with the keyword ZIGBEE, the available keywords to use are as follows, with either z= or n= being required.
 
-* n=My Device, to use the device friendly name, which may include '/'. (name= is an alias.) The IEEE address will be looked up.
+* n=My Device (name= is an alias), to use the device friendly name, which may include '/'. The IEEE address will be looked up.
 
 ... or
-* z=0x12345678abcdef123, to use the IEEE address of the Zigbee device, which should be used where a friendly name is not defined, or if one is defined and z= is used then the friendly name will be looked up. (addr= is an alias.)
+* z=0x12345678abcdef123 (addr= is an alias), to use the IEEE address of the Zigbee device, which should be used where a friendly name is not defined, or if one is defined and z= is used then the friendly name will be looked up.
 
 Add the following:
 
-* light, to indicate a lighting object (the default type)
+* light, to indicate a lighting object (the default type, so optional to specify for lights)
 * switch, to indicate a switching object
 * sensor, to indicate a sensor object
-* exposed=exposes_name, to tie a C-Bus user parameter, measurement or lighting object to an exposed Zigbee value (not required for light)
-* type=number|boolean, to specify the data type ("number" is the default, not required for light)
-* parameter=parameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object (the default is "parameter", not required for light)
+* exposed=exposes_name, to tie a C-Bus object to an exposed Zigbee value (not used for light)
+* type=number|boolean, to specify the data type (sensor only, "number" is the default)
+* parameter=altparameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object (the default is "parameter", not used for light)
 
 ### Keyword Examples
 
