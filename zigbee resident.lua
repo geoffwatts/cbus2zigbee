@@ -247,10 +247,25 @@ local function cudZig()
         if not found then zigbeeDevices[_L.z].exposed[#zigbeeDevices[_L.z].exposed + 1] = { expose=_L.exposed, type=_L.type, alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, } end
         return true
       end
+      
+      local function configureReporting(friendly)
+        local config = 'bridge/request/device/configure_reporting'
+        local msg = {
+          id = friendly,
+          cluster = 'genLevelCtrl',
+          attribute = 'currentLevel',
+          minimum_report_interval = 0,
+          maximum_report_interval = 3,
+          reportable_change = 1,
+        }
+        if logging then log('Configure reporting for '..alias..' '..friendly..', '..json.encode(msg)) end
+        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+      end
 
       local allow = {
         light = {setup = function ()
             zigbee[alias].address = _L.z
+            configureReporting(zigbeeDevices[_L.z].friendly)
             return true
           end
         },
@@ -275,7 +290,7 @@ local function cudZig()
 
       if _L.n ~= '' then
         _L.z = zigbeeName[_L.n]
-        if _L.z == nil then log('Error: Zigbee device with friendly name of '.._L.n..' does not exist, skipping') _L.z = '' end
+        if _L.z == nil then log('Error: Zigbee device with friendly name of '.._L.n..' does not exist, skipping') goto skip end
       end
 
       if not _L.z:find('^0[xX]%x*$') then
@@ -288,7 +303,7 @@ local function cudZig()
           goto next
         end
 
-        log('Adding '..dType..' '..alias..' Zigbee '.._L.z..((zigbee[alias].exposed and ', exposed '..zigbee[alias].exposed) or ''))
+        log('Adding '..dType..' '..alias..', '..zigbeeDevices[_L.z].friendly..(zigbeeDevices[_L.z].friendly ~= _L.z and (' ('.._L.z..')') or '')..((zigbee[alias].exposed and ', exposed '..zigbee[alias].exposed) or ''))
         zigbeeDevices[_L.z].class = dType
 
         zigbee[alias].value = grp.getvalue(alias)
@@ -303,6 +318,7 @@ local function cudZig()
       end
       ::next::
       zigbeeAddress[_L.z] = { alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, }
+      ::skip::
     end
   end
 
