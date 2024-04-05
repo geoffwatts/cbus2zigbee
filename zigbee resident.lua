@@ -195,7 +195,7 @@ local function cudZig()
   local addCount = 0
   local modCount = 0
   local remCount = 0
-  local alias, k, v
+  local alias, k, v, stat, err
   local synonym = { addr = 'z', name = 'n' } -- Synonyms for some keywords, allowing variations
   local special = {} -- special use keywords, e.g. { noavailqueue=true, }
 
@@ -215,17 +215,14 @@ local function cudZig()
         property = 'property',
       }
 
-      local function getExposes()
-        local exposes = {}
-        local function getProps(tbl)
-          local val
-          for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[_L.property] then exposes[val[_L.property]] = true end end end
-        end
-        getProps(zigbeeDevices[_L.z].exposesRaw)
-        return exposes
-      end
-
       local function setupExposed()
+        local function getExposes()
+          local exposes = {}
+          local function getProps(tbl) local val for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[_L.property] then exposes[val[_L.property]] = true end end end end
+          getProps(zigbeeDevices[_L.z].exposesRaw)
+          return exposes
+        end
+
         if zigbeeDevices[_L.z].exposes == nil then
           if zigbeeDevices[_L.z].exposesRaw ~= nil and hasMembers(zigbeeDevices[_L.z].exposesRaw) then
             zigbeeDevices[_L.z].exposes = getExposes()
@@ -265,7 +262,8 @@ local function cudZig()
       local allow = {
         light = {setup = function ()
             zigbee[alias].address = _L.z
-            configureReporting(zigbeeDevices[_L.z].friendly)
+            stat, err = pcall(configureReporting, zigbeeDevices[_L.z].friendly)
+            if not stat then log('Error calling configureReporting(): '..err) end
             return true
           end
         },
@@ -294,7 +292,7 @@ local function cudZig()
       end
 
       if not _L.z:find('^0[xX]%x*$') then
-        log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias)
+        log('Error: Invalid or no z= hexadecimal address specified for Zigbee object '..alias) goto skip
       else
         if zigbeeDevices[_L.z] ~= nil then
           if not allow[dType].setup() then goto next end
@@ -407,20 +405,6 @@ local function publish(alias, level, origin, ramp)
   if logging then log('Publish '..alias..' '..topic..', '..json.encode(msg)) end
   client:publish(topic, json.encode(msg), QoS, false)
   return true
-end
-
-
---[[
-Publish current level and state to MQTT
---]]
-local function publishCurrent()
-  local keep = {}
-  local alias, v
-  for alias, v in pairs(zigbee) do
-    local level = grp.getvalue(alias)
-    if publish(alias, level, level, 0) == 'retain' then keep[#keep+1] = cmd end
-  end
-  cbusMessages = keep
 end
 
 
@@ -709,7 +693,6 @@ while true do
     end
     if not reconnect then -- Full publish topics
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
-      stat, err = pcall(publishCurrent) if not stat then log('Error publishing current values: '..err) end -- Log and continue
       outstandingLogged = socket.gettime()
     else -- Resubscribe
       local friendly
