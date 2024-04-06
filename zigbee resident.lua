@@ -100,7 +100,7 @@ local function eventCallback(event)
   if not zigbee[event.dst] then return end
   local value
   local origin = zigbee[event.dst].value
-  local ramp = tonumber(string.sub(event.datahex,5,8),16)
+  local ramp = tonumber(string.sub(event.datahex,7,8),16)
   local parts = string.split(event.dst, '/')
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
@@ -691,7 +691,7 @@ while true do
         if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
       end
     end
-    if not reconnect then -- Full publish topics
+    if not reconnect then -- Initial create/update/delete
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
       outstandingLogged = socket.gettime()
     else -- Resubscribe
