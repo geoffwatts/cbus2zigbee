@@ -32,6 +32,8 @@ local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, 
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
+local bridgeOnline = false  -- Set to true when the bridge is online
+local haveDevices = false   -- Set to true when bridge/devices update has been processed
 local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
@@ -118,7 +120,7 @@ local function eventCallback(event)
   if value == zigbee[event.dst].value then return end -- Don't publish if already at the level
   zigbee[event.dst].value = value
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
-  if ramp > 0 then clearMqttSuppress[event.dst] = true end -- Clear suppression because at final level
+  if ramp > 0 then clearMqttSuppress[event.dst] = true end -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
 end
 
 local localbus = require('localbus').new(busTimeout) -- Set up the localbus
@@ -190,6 +192,11 @@ end
 Create / update / delete ZIGBEE devices
 --]]
 local function cudZig()
+  if not haveDevices then
+    log('Warning: No device discovery yet, create/update/delete skipped')
+    return
+  end
+
   local grps = getGroups('ZIGBEE')
   local found = {}
   local addCount = 0
@@ -366,7 +373,7 @@ Publish to MQTT
 local function publish(alias, level, origin, ramp)
   if not zigbee[alias].address then return false end
   if zigbee[alias].class == 'sensor' then return false end
-  if not zigbeeDevices[zigbee[alias].address].available then if keepMessagesForOfflineQueued then return 'retain' else return false end end -- Device is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
+  if not zigbeeDevices[zigbee[alias].address].available or not bridgeOnline then if keepMessagesForOfflineQueued then return 'retain' else return false end end -- Device or bridge is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
 
   if clearMqttSuppress[alias] then
     suppressMqttUpdates[alias] = nil
@@ -485,68 +492,62 @@ local function statusUpdate(friendly, payload)
   if not device then return end
 
   if device.class == 'switch' then
-    local s
-    for _, s in ipairs(device.exposed) do
-      local value = payload[s.expose]
+    local z
+    for _, z in ipairs(device.exposed) do
+      local value = payload[z.expose]
       value = (value == 'ON') and 255 or 0
       if value then
-        if grp.getvalue(s.alias) ~= value then
-          if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
-          ignoreCbus[s.alias] = true
-          SetCBusLevel(s.net, s.app, s.group, value, 0)
-          zigbee[s.alias].value = value
+        if grp.getvalue(z.alias) ~= value then
+          if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
+          ignoreCbus[z.alias] = true
+          grp.write(z.alias, value)
+          zigbee[z.alias].value = value
         end
       else
-        log('Error: Nil value for sensor '..salias)
+        log('Error: Nil value for switch '..z.alias)
       end
     end
   elseif device.class == 'sensor' then
-    local s
-    for _, s in ipairs(device.exposed) do
-      local value = payload[s.expose]
-      if s.type == 'boolean' then value = value and 1 or 0 end
+    local z
+    for _, z in ipairs(device.exposed) do
+      local value = payload[z.expose]
+      if z.type == 'boolean' then value = value and 1 or 0 end
       if value then
-        if string.format('%.5f', grp.getvalue(s.alias)) ~= string.format('%.5f', value) then
-          if logging then log('Set '..s.alias..', '..s.expose..'='..value) end
-          ignoreCbus[s.alias] = true
-          if lighting[tostring(s.app)] then -- Lighting group sensor
-            SetCBusLevel(s.net, s.app, s.group, value, 0)
-          elseif s.app == 250 then -- User param
-            SetUserParam(s.net, s.group, value)
-          elseif s.app == 228 then -- Measurement
-            SetCBusMeasurement(s.net, s.group, s.channel, value, cbusMeasurementUnits[s.expose] or 0)
+        if string.format('%.5f', grp.getvalue(z.alias)) ~= string.format('%.5f', value) then
+          if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
+          ignoreCbus[z.alias] = true
+          if z.app == 228 then -- Special case for measurement app
+            SetCBusMeasurement(z.net, z.group, z.channel, value, cbusMeasurementUnits[z.expose] or 0)
+          else
+            grp.write(z.alias, value)
           end
-          zigbee[s.alias].value = value
+          zigbee[z.alias].value = value
         end
       else
-        log('Error: Nil value for sensor '..salias)
+        log('Error: Nil value for sensor '..z.alias)
       end
     end
   else
-    local net = zigbeeAddress[zigbeeName[friendly]].net
-    local app = zigbeeAddress[zigbeeName[friendly]].app
-    local group = zigbeeAddress[zigbeeName[friendly]].group
-    local alias = zigbeeAddress[zigbeeName[friendly]].alias
-
+    local z = zigbeeAddress[zigbeeName[friendly]]
     if payload.brightness then
       if payload.state == 'ON' then
-        local level = payload.brightness
+        local value = payload.brightness
         local max = device.max
         if max ~= nil then
-         if level == max then level = 255 end
+         if value == max then value = 255 end
         end
-        if grp.getvalue(alias) ~= level then
-          if logging then log('Set '..alias..' to '..level) end
-          ignoreCbus[alias] = true
-          SetCBusLevel(net, app, group, level, 0)
-          zigbee[alias].value = level
+        if grp.getvalue(z.alias) ~= value then
+          if logging then log('Set '..z.alias..' to '..value) end
+          ignoreCbus[z.alias] = true
+          grp.write(z.alias, value)
+          zigbee[z.alias].value = value
         end
       else
-        if grp.getvalue(alias) ~= 0 then
-          if logging then log('Set '..alias..' to OFF') end
-          ignoreCbus[alias] = true
-          SetCBusLevel(net, app, group, 0, 0)
-          zigbee[alias].value = 0
+        if grp.getvalue(z.alias) ~= 0 then
+          if logging then log('Set '..z.alias..' to OFF') end
+          ignoreCbus[z.alias] = true
+          grp.write(z.alias, 0)
+          zigbee[z.alias].value = 0
         end
       end
     end
@@ -561,18 +562,17 @@ local function outstandingMqttMessage()
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
-      if parts[3] == 'devices' then updateDevices(msg.payload)
+      if parts[3] == 'state' then bridgeOnline = msg.payload.state == 'online' if logging then log('Bridge is '..msg.payload.state) end
+      elseif parts[3] == 'devices' then updateDevices(msg.payload) haveDevices = true
       elseif parts[3] == 'groups' then updateGroups(msg.payload)
       end
     else
-      -- Find the friendly name
       local i
       local friendly = {}
       local s = 2
       if parts[#parts] == 'availability' then
         local avail = false
-        local e = #parts - 1
-        for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/')
+        local e = #parts - 1 for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
         if type(msg.payload) == 'string' then -- Legacy mode
           avail = msg.payload == 'online'
         else
@@ -583,8 +583,7 @@ local function outstandingMqttMessage()
       elseif parts[#parts] == 'set' then -- Do nothing
       elseif parts[#parts] == 'get' then -- Do nothing
       else -- Status update
-        local e = #parts
-        for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/')
+        local e = #parts for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
         if zigbeeName[friendly] then
           local alias = zigbeeAddress[zigbeeName[friendly]].alias
           if not ignoreMqtt[alias] and not suppressMqttUpdates[alias] then statusUpdate(friendly, msg.payload) end
@@ -604,7 +603,7 @@ local timeoutStart, connectStart, mqttConnected
 local onReconnect = {}
 local bridgeSubscribed = false
 
-local changesChecked = socket.gettime()
+local changesChecked
 local reportOutstandingEvery = 300 -- If there are outstanding C-Bus messages in the queue, log at intervals (if logging is enabled)
 local outstandingLogged = socket.gettime() - reportOutstandingEvery
 
@@ -685,15 +684,19 @@ while true do
     bridgeSubscribed = true
     -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
     while socket.gettime() - mqttConnected < 0.5 do
-      client:loop(0)
+      localbus:step()
+      client:loop(mqttTimeout)
       if #mqttMessages > 0 then
         stat, err = pcall(outstandingMqttMessage) -- Process outstanding bridge messages
         if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
       end
+      if haveDevices then break end
     end
+    if not haveDevices then log('Error: Bridge devices not yet retrieved, proceeding anyway') end
     if not reconnect then -- Initial create/update/delete
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
-      outstandingLogged = socket.gettime()
+      changesChecked = socket.gettime()
+      outstandingLogged = changesChecked
     else -- Resubscribe
       local friendly
       for _, friendly in ipairs(onReconnect) do
