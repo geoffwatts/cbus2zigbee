@@ -504,7 +504,6 @@ local function statusUpdate(alias, friendly, payload)
           if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
           ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, value)
-          zigbee[z.alias].value = value
         end
       else
         log('Error: Nil value for switch '..z.alias)
@@ -523,7 +522,6 @@ local function statusUpdate(alias, friendly, payload)
           else
             grp.write(z.alias, value)
           end
-          zigbee[z.alias].value = value
         end
       else
         log('Error: Nil value for sensor '..z.alias)
@@ -542,14 +540,12 @@ local function statusUpdate(alias, friendly, payload)
           if logging then log('Set '..z.alias..' to '..value) end
           ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, value)
-          zigbee[z.alias].value = value
         end
       else
         if grp.getvalue(z.alias) ~= 0 then
           if logging then log('Set '..z.alias..' to OFF') end
-          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
+          ignoreCbus[z.alias] = { expecting=0, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, 0)
-          zigbee[z.alias].value = 0
         end
       end
     end
