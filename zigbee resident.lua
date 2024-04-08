@@ -647,7 +647,7 @@ while true do
 
     for alias, ignore in pairs(ignoreCbus) do
       if socket.gettime() - ignore.time > ignoreTimeout then
-        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..ignoreCbus[alias]..' was never received') end
+        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..ignoreCbus[alias].expecting..' was never received') end
         ignoreCbus[alias] = nil
       end
     end
