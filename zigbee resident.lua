@@ -626,9 +626,6 @@ while true do
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
     end
 
-    -- Process MQTT message buffers synchronously - sends and receives
-    client:loop(mqttTimeout)
-
     if #cbusMessages > 0 then
       -- Send outstanding messages to MQTT
       stat, err = pcall(outstandingCbusMessage)
@@ -638,6 +635,9 @@ while true do
         log(#cbusMessages..' outstanding message'..(#cbusMessages > 1 and 's' or '')..', device(s) are offline')
       end
     end
+
+    -- Process MQTT message buffers synchronously - sends and receives
+    client:loop(mqttTimeout)
 
     if #mqttMessages > 0 then
       -- Send outstanding messages to CBus
