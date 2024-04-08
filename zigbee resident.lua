@@ -33,7 +33,7 @@ local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, 
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
-local bridgeOnline = false  -- Set to true when the bridge is online
+local bridgeOnline = true   -- Set to true when the bridge is online
 local haveDevices = false   -- Set to true when bridge/devices update has been processed
 local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
@@ -404,7 +404,7 @@ local function publish(alias, level, origin, ramp)
       duration = nil
     end
     local state = (level ~= 0) and 'ON' or 'OFF'
-    local brightness = (state == 'ON' or duration > 0) and level or nil
+    local brightness = (state == 'ON' or (duration ~= nil and duration > 0)) and level or nil
     if duration ~= nil and duration > 0 and level == 0 then state = nil end
     msg = {
       brightness = brightness,
@@ -560,7 +560,7 @@ local function outstandingMqttMessage()
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
-      if parts[3] == 'state' then bridgeOnline = msg.payload.state == 'online' if logging then log('Bridge is '..msg.payload.state) end
+      if parts[3] == 'state' then if logging and bridgeOnline ~= msg.payload.state == 'online' then log('Bridge is '..msg.payload.state) bridgeOnline = msg.payload.state == 'online' end
       elseif parts[3] == 'devices' then updateDevices(msg.payload) haveDevices = true
       elseif parts[3] == 'groups' then updateGroups(msg.payload)
       end
@@ -576,8 +576,8 @@ local function outstandingMqttMessage()
         else
           avail = msg.payload.state == 'online'
         end
+        if logging and zigbeeDevices[zigbeeName[friendly]].available ~= avail then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
         zigbeeDevices[zigbeeName[friendly]].available = avail
-        if logging then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
       elseif parts[#parts] == 'set' then -- Do nothing
       elseif parts[#parts] == 'get' then -- Do nothing
       else -- Status update
@@ -593,7 +593,7 @@ local function outstandingMqttMessage()
   mqttMessages = {}
 end
 
-    
+
 -- Reconnect variables
 local warningTimeout = 30
 local timeout = 1
