@@ -316,7 +316,6 @@ local function cudZig()
         zigbee[alias].value = grp.getvalue(alias)
         local friendly = zigbeeDevices[_L.z].friendly
         if not subscribed[friendly] or dType == 'sensor' then
-          if dType ~= 'sensor' then ignoreMqtt[alias] = true end
           client:subscribe(mqttTopic..friendly..'/#', QoS)
           subscribed[friendly] = true
           if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
@@ -461,7 +460,7 @@ local function updateDevices(payload)
           if e.features and type(d.features) ~= 'userdata' then
             for _, f in ipairs(e.features) do
               if f.name == 'brightness' then
-                zigbeeDevices[d.ieee_address].max = value_max
+                zigbeeDevices[d.ieee_address].max = f.value_max
               end
             end
           end
@@ -488,13 +487,11 @@ end
 --[[
 A device has updated status, so send to C-Bus
 --]]
-local function statusUpdate(friendly, payload)
+local function statusUpdate(alias, friendly, payload)
   local device
   if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
   if not device then return end
-  if ignoreMqtt[alias] then return end
-  if suppressMqttUpdates[alias] then return end
-
+  if ignoreMqtt[alias] or suppressMqttUpdates[alias] then return end
   if device.class == 'switch' then
     local z
     for _, z in ipairs(device.exposed) do
@@ -590,7 +587,7 @@ local function outstandingMqttMessage()
         local e = #parts for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
         if zigbeeName[friendly] then
           local alias = zigbeeAddress[zigbeeName[friendly]].alias
-          statusUpdate(friendly, msg.payload)
+          statusUpdate(alias, friendly, msg.payload)
           ignoreMqtt[alias] = nil
         end
       end
