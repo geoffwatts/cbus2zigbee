@@ -379,6 +379,8 @@ local function publish(alias, level, origin, ramp)
 
   if clearMqttSuppress[alias] then
     suppressMqttUpdates[alias] = nil
+    clearMqttSuppress[alias] = nil
+    if logging then log('Clear suppressMqttUpdates for '..alias) end
     return true
   end
 
@@ -402,7 +404,7 @@ local function publish(alias, level, origin, ramp)
       duration = nil
     end
     local state = (level ~= 0) and 'ON' or 'OFF'
-    local brightness = (state == 'ON') and level or nil
+    local brightness = (state == 'ON' or duration > 0) and level or nil
     if duration ~= nil and duration > 0 and level == 0 then state = nil end
     msg = {
       brightness = brightness,
@@ -424,11 +426,9 @@ Receive commands from C-Bus and publish to MQTT
 local function outstandingCbusMessage()
   local keep = {}
   for _, cmd in ipairs(cbusMessages) do
-    if ignoreCbus[cmd.alias] ~= nil and cmd.level == ignoreCbus[cmd.alias].expecting then
-      ignoreCbus[cmd.alias] = nil
-    else
-      if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
-    end
+    if ignoreCbus[cmd.alias] ~= nil and cmd.level == ignoreCbus[cmd.alias].expecting then ignoreCbus[cmd.alias] = nil goto next end
+    if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
+    ::next::
   end
   cbusMessages = keep
 end
@@ -502,7 +502,7 @@ local function statusUpdate(alias, friendly, payload)
       if value then
         if grp.getvalue(z.alias) ~= value then
           if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
-          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), }
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, value)
           zigbee[z.alias].value = value
         end
@@ -540,14 +540,14 @@ local function statusUpdate(alias, friendly, payload)
         end
         if grp.getvalue(z.alias) ~= value then
           if logging then log('Set '..z.alias..' to '..value) end
-          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), }
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, value)
           zigbee[z.alias].value = value
         end
       else
         if grp.getvalue(z.alias) ~= 0 then
           if logging then log('Set '..z.alias..' to OFF') end
-          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), }
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, 0)
           zigbee[z.alias].value = 0
         end
@@ -647,7 +647,7 @@ while true do
 
     for alias, ignore in pairs(ignoreCbus) do
       if socket.gettime() - ignore.time > ignoreTimeout then
-        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..ignoreCbus[alias].expecting..' was never received') end
+        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..tostring(ignoreCbus[alias].expecting)..' was never received - value when set was '..tostring(ignoreCbus[alias].was)) end
         ignoreCbus[alias] = nil
       end
     end
