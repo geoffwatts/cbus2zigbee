@@ -108,7 +108,7 @@ local function eventCallback(event)
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
-    if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
+    if event.meta == 'admin' or event.sender ~= 'cb' then -- A ramp always begins with an admin or non-C-Bus message (like a scene, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
       if ramp > 0 then
         cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
         return
