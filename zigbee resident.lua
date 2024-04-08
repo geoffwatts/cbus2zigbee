@@ -19,6 +19,7 @@ local logging = true
 
 local busTimeout = 0.1
 local mqttTimeout = 0
+local ignoreTimeout = 0.5
 
 local mqttTopic = 'zigbee2mqtt/'
 local mqttClientId = 'cbus2zigbee'
@@ -37,7 +38,7 @@ local haveDevices = false   -- Set to true when bridge/devices update has been p
 local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
-local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
+local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, contains expected completion timestamp
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
 
@@ -401,9 +402,10 @@ local function publish(alias, level, origin, ramp)
       duration = nil
     end
     local state = (level ~= 0) and 'ON' or 'OFF'
+    local brightness = (state == 'ON') and level or nil
     if duration ~= nil and duration > 0 and level == 0 then state = nil end
     msg = {
-      brightness = level,
+      brightness = brightness,
       state = state,
       transition = duration,
     }
@@ -422,7 +424,7 @@ Receive commands from C-Bus and publish to MQTT
 local function outstandingCbusMessage()
   local keep = {}
   for _, cmd in ipairs(cbusMessages) do
-    if ignoreCbus[cmd.alias] then
+    if ignoreCbus[cmd.alias] ~= nil and cmd.level == ignoreCbus[cmd.alias].expecting then
       ignoreCbus[cmd.alias] = nil
     else
       if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
@@ -500,7 +502,7 @@ local function statusUpdate(alias, friendly, payload)
       if value then
         if grp.getvalue(z.alias) ~= value then
           if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
-          ignoreCbus[z.alias] = true
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), }
           grp.write(z.alias, value)
           zigbee[z.alias].value = value
         end
@@ -516,7 +518,6 @@ local function statusUpdate(alias, friendly, payload)
       if value then
         if string.format('%.5f', grp.getvalue(z.alias)) ~= string.format('%.5f', value) then
           if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
-          ignoreCbus[z.alias] = true
           if z.app == 228 then -- Special case for measurement app
             SetCBusMeasurement(z.net, z.group, z.channel, value, cbusMeasurementUnits[z.expose] or 0)
           else
@@ -539,14 +540,14 @@ local function statusUpdate(alias, friendly, payload)
         end
         if grp.getvalue(z.alias) ~= value then
           if logging then log('Set '..z.alias..' to '..value) end
-          ignoreCbus[z.alias] = true
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), }
           grp.write(z.alias, value)
           zigbee[z.alias].value = value
         end
       else
         if grp.getvalue(z.alias) ~= 0 then
           if logging then log('Set '..z.alias..' to OFF') end
-          ignoreCbus[z.alias] = true
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), }
           grp.write(z.alias, 0)
           zigbee[z.alias].value = 0
         end
@@ -642,6 +643,13 @@ while true do
       -- Send outstanding messages to CBus
       stat, err = pcall(outstandingMqttMessage)
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
+    end
+
+    for alias, ignore in pairs(ignoreCbus) do
+      if socket.gettime() - ignore.time > ignoreTimeout then
+        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..ignoreCbus[alias]..' was never received') end
+        ignoreCbus[alias] = nil
+      end
     end
   elseif mqttStatus == 2 or not mqttStatus then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
