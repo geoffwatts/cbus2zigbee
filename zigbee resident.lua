@@ -259,7 +259,7 @@ local function cudZig()
           cluster = 'genLevelCtrl',
           attribute = 'currentLevel',
           minimum_report_interval = 0,
-          maximum_report_interval = 3,
+          maximum_report_interval = 3600,
           reportable_change = 1,
         }
         if logging then log('Configure reporting for '..alias..' '..friendly..', '..json.encode(msg)) end
@@ -276,12 +276,14 @@ local function cudZig()
         },
         switch = {setup = function ()
             zigbee[alias].address = _L.z
+            if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
             if not setupExposed() then return false end
             return true
           end
         },
         sensor = {setup = function ()
             zigbee[alias].address = _L.z
+            if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
             if not setupExposed() then return false end
             return true
           end
@@ -466,7 +468,7 @@ local function updateDevices(payload)
         end
       end
       if not new and modified then
-        if logging then log('Update for a device '..d.ieee_address..(d.friendly_name ~= nil and ', '..d.friendly_name or '')) end
+        if logging then log('Update for a device '..d.ieee_address..(d.friendly_name ~= nil and ' (friendly name: '..d.friendly_name..')' or '')) end
       end
     end
     ::skip::
