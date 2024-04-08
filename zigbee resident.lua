@@ -492,6 +492,8 @@ local function statusUpdate(friendly, payload)
   local device
   if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
   if not device then return end
+  if ignoreMqtt[alias] then return end
+  if suppressMqttUpdates[alias] then return end
 
   if device.class == 'switch' then
     local z
@@ -588,7 +590,7 @@ local function outstandingMqttMessage()
         local e = #parts for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
         if zigbeeName[friendly] then
           local alias = zigbeeAddress[zigbeeName[friendly]].alias
-          if not ignoreMqtt[alias] and not suppressMqttUpdates[alias] then statusUpdate(friendly, msg.payload) end
+          statusUpdate(friendly, msg.payload)
           ignoreMqtt[alias] = nil
         end
       end
