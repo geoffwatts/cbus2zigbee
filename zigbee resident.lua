@@ -14,11 +14,13 @@ mqttPassword = ''
 local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, queue outstanding C-Bus to zigbee messages
+local logExposedSummary = true -- The exposed properties are logged when devices are discovered or updated
 
 local logging = true
 
 local busTimeout = 0.1
 local mqttTimeout = 0
+local ignoreTimeout = 0.5
 
 local mqttTopic = 'zigbee2mqtt/'
 local mqttClientId = 'cbus2zigbee'
@@ -32,12 +34,12 @@ local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, 
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- TO DO
-local bridgeOnline = false  -- Set to true when the bridge is online
+local bridgeOnline = true   -- Set to true when the bridge is online
 local haveDevices = false   -- Set to true when bridge/devices update has been processed
 local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
-local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops
+local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, contains expected completion timestamp
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
 
@@ -107,7 +109,7 @@ local function eventCallback(event)
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
-    if event.meta == 'admin' then -- A ramp always begins with an admin message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
+    if event.meta == 'admin' or event.sender ~= 'cb' then -- A ramp always begins with an admin or non-C-Bus message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
       if ramp > 0 then
         cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
         return
@@ -189,6 +191,40 @@ end
 
 
 --[[
+Get all the exposes value properties for a device
+--]]
+local function getExposes(exposesRaw, prop)
+  if prop == nil then prop = 'property' end
+  local exposes = {}
+  local function getProps(tbl) local val for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[prop] then exposes[val[prop]] = true end end end end
+  getProps(exposesRaw)
+  return exposes
+end
+
+
+--[[
+Get the input clusters for a device
+--]]
+local function getClusters(endpoints)
+  local clusters = {}
+  local function getInput(tbl) local k, val for k, val in pairs(tbl) do if type(val) == "table" then getInput(val) end if k == 'input' then local c for _, c in ipairs(val) do clusters[c] = true end end end end
+  getInput(endpoints)
+  return clusters
+end
+
+
+--[[
+Get the configured reportings for a device
+--]]
+local function getReportings(endpoints)
+  local reportings = {}
+  local function getCluster(tbl) local k, val for k, val in pairs(tbl) do if type(val) == "table" then getCluster(val) end if k == 'configured_reportings' then local c for _, c in ipairs(val) do if reportings[c.cluster] == nil then reportings[c.cluster] = {} end reportings[c.cluster][c.attribute] = true end end end end
+  getCluster(endpoints)
+  return reportings
+end
+
+
+--[[
 Create / update / delete ZIGBEE devices
 --]]
 local function cudZig()
@@ -203,7 +239,7 @@ local function cudZig()
   local modCount = 0
   local remCount = 0
   local alias, k, v, stat, err
-  local synonym = { addr = 'z', name = 'n' } -- Synonyms for some keywords, allowing variations
+  local synonym = { addr='z', name='n', exposes='exposed', } -- Synonyms for some keywords, allowing variations
   local special = {} -- special use keywords, e.g. { noavailqueue=true, }
 
   for alias, v in pairs(grps) do
@@ -216,23 +252,15 @@ local function cudZig()
       local _L = {
         n = '',
         z = '',
-        sensor = '',
-        type = '',
+        type = 'number',
         exposed = '', 
         property = 'property',
       }
 
-      local function setupExposed()
-        local function getExposes()
-          local exposes = {}
-          local function getProps(tbl) local val for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[_L.property] then exposes[val[_L.property]] = true end end end end
-          getProps(zigbeeDevices[_L.z].exposesRaw)
-          return exposes
-        end
-
+      local function setupExposed(exposesRaw, prop)
         if zigbeeDevices[_L.z].exposes == nil then
           if zigbeeDevices[_L.z].exposesRaw ~= nil and hasMembers(zigbeeDevices[_L.z].exposesRaw) then
-            zigbeeDevices[_L.z].exposes = getExposes()
+            zigbeeDevices[_L.z].exposes = getExposes(exposesRaw, prop)
           else
             log('Error, device '..alias..', '.._L.z..' has nothing exposed')
             return false
@@ -253,17 +281,40 @@ local function cudZig()
       end
       
       local function configureReporting(friendly)
+        local msg
         local config = 'bridge/request/device/configure_reporting'
-        local msg = {
-          id = friendly,
-          cluster = 'genLevelCtrl',
-          attribute = 'currentLevel',
-          minimum_report_interval = 0,
-          maximum_report_interval = 3600,
-          reportable_change = 1,
-        }
-        if logging then log('Configure reporting for '..alias..' '..friendly..', '..json.encode(msg)) end
-        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+        local configured = {}
+        if zigbeeDevices[_L.z].clusters.genLevelCtrl then
+          local exists = zigbeeDevices[_L.z].reporting.genLevelCtrl and zigbeeDevices[_L.z].reporting.genLevelCtrl.currentLevel
+          if not exists then
+            configured[#configured+1] = 'currentLevel'
+            msg = { id = friendly, cluster='genLevelCtrl', attribute='currentLevel', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+        end
+        if zigbeeDevices[_L.z].clusters.genOnOff then
+          local exists = zigbeeDevices[_L.z].reporting.genOnOff and zigbeeDevices[_L.z].reporting.genOnOff.onOff
+          if not exists then
+            configured[#configured+1] = 'onOff'
+            msg = { id = friendly, cluster='genOnOff', attribute = 'onOff', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+        end
+        if zigbeeDevices[_L.z].clusters.lightingColorCtrl then
+          local exists = zigbeeDevices[_L.z].reporting.lightingColorCtrl and zigbeeDevices[_L.z].reporting.lightingColorCtrl.currentX
+          if not exists then
+            configured[#configured+1] = 'currentX'
+            msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentX', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+          local exists = zigbeeDevices[_L.z].reporting.lightingColorCtrl and zigbeeDevices[_L.z].reporting.lightingColorCtrl.currentY
+          if not exists then
+            configured[#configured+1] = 'currentY'
+            msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentY', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+        end
+        if logging and hasMembers(configured) then log('Configured reporting for '..alias..' '..friendly..': '..table.concat(configured, ', ')) end
       end
 
       local allow = {
@@ -277,14 +328,14 @@ local function cudZig()
         switch = {setup = function ()
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
-            if not setupExposed() then return false end
+            if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
             return true
           end
         },
         sensor = {setup = function ()
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
-            if not setupExposed() then return false end
+            if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
             return true
           end
         },
@@ -378,6 +429,8 @@ local function publish(alias, level, origin, ramp)
 
   if clearMqttSuppress[alias] then
     suppressMqttUpdates[alias] = nil
+    clearMqttSuppress[alias] = nil
+    if logging then log('Clear suppressMqttUpdates for '..alias) end
     return true
   end
 
@@ -401,9 +454,10 @@ local function publish(alias, level, origin, ramp)
       duration = nil
     end
     local state = (level ~= 0) and 'ON' or 'OFF'
+    local brightness = (state == 'ON' or (duration ~= nil and duration > 0)) and level or nil
     if duration ~= nil and duration > 0 and level == 0 then state = nil end
     msg = {
-      brightness = level,
+      brightness = brightness,
       state = state,
       transition = duration,
     }
@@ -422,11 +476,9 @@ Receive commands from C-Bus and publish to MQTT
 local function outstandingCbusMessage()
   local keep = {}
   for _, cmd in ipairs(cbusMessages) do
-    if ignoreCbus[cmd.alias] then
-      ignoreCbus[cmd.alias] = nil
-    else
-      if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
-    end
+    if ignoreCbus[cmd.alias] ~= nil and cmd.level == ignoreCbus[cmd.alias].expecting then ignoreCbus[cmd.alias] = nil goto next end
+    if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
+    ::next::
   end
   cbusMessages = keep
 end
@@ -439,6 +491,8 @@ local function updateDevices(payload)
   local d, e, f, new, modified
   local found = {}
   local kill = {}
+  local summary = {}
+  local logSummary = false
   for _, d in ipairs(payload) do
     new = false
     modified = false
@@ -469,11 +523,23 @@ local function updateDevices(payload)
       if not new and modified then
         if logging then log('Update for a device '..d.ieee_address..(d.friendly_name ~= nil and ' (friendly name: '..d.friendly_name..')' or '')) end
       end
+      if new or modified then
+        local exposes = getExposes(d.definition.exposes)
+        local exp = {} local e for e, _ in pairs(exposes) do exp[#exp+1] = e end table.sort(exp) summary[#summary+1] = zigbeeDevices[d.ieee_address].friendly..': '..table.concat(exp, ', ')
+        logSummary = true
+        zigbeeDevices[d.ieee_address].clusters = getClusters(d.endpoints)
+        zigbeeDevices[d.ieee_address].reporting = getReportings(d.endpoints)
+      end
     end
     ::skip::
   end
   for d, _ in pairs(zigbeeDevices) do if not found[d] then kill[d] = true if logging then log('Removed a device '..d) end end end
   for d, _ in pairs(kill) do zigbeeDevices[d] = nil end
+  if logExposedSummary and logSummary and #summary then
+    local sorted = 'Device exposed property summary' sorted = '\n'..sorted..'\n'..string.rep('-', #sorted)
+    table.sort(summary) local s for _, s in ipairs(summary) do sorted = sorted..'\n'..s end
+    log(sorted)
+  end
 end
 
 
@@ -500,9 +566,8 @@ local function statusUpdate(alias, friendly, payload)
       if value then
         if grp.getvalue(z.alias) ~= value then
           if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
-          ignoreCbus[z.alias] = true
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, value)
-          zigbee[z.alias].value = value
         end
       else
         log('Error: Nil value for switch '..z.alias)
@@ -516,13 +581,11 @@ local function statusUpdate(alias, friendly, payload)
       if value then
         if string.format('%.5f', grp.getvalue(z.alias)) ~= string.format('%.5f', value) then
           if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
-          ignoreCbus[z.alias] = true
           if z.app == 228 then -- Special case for measurement app
             SetCBusMeasurement(z.net, z.group, z.channel, value, cbusMeasurementUnits[z.expose] or 0)
           else
             grp.write(z.alias, value)
           end
-          zigbee[z.alias].value = value
         end
       else
         log('Error: Nil value for sensor '..z.alias)
@@ -539,16 +602,14 @@ local function statusUpdate(alias, friendly, payload)
         end
         if grp.getvalue(z.alias) ~= value then
           if logging then log('Set '..z.alias..' to '..value) end
-          ignoreCbus[z.alias] = true
+          ignoreCbus[z.alias] = { expecting=value, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, value)
-          zigbee[z.alias].value = value
         end
       else
         if grp.getvalue(z.alias) ~= 0 then
           if logging then log('Set '..z.alias..' to OFF') end
-          ignoreCbus[z.alias] = true
+          ignoreCbus[z.alias] = { expecting=0, time=socket.gettime(), was=grp.getvalue(z.alias), }
           grp.write(z.alias, 0)
-          zigbee[z.alias].value = 0
         end
       end
     end
@@ -563,7 +624,7 @@ local function outstandingMqttMessage()
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
-      if parts[3] == 'state' then bridgeOnline = msg.payload.state == 'online' if logging then log('Bridge is '..msg.payload.state) end
+      if parts[3] == 'state' then if logging and bridgeOnline ~= msg.payload.state == 'online' then log('Bridge is '..msg.payload.state) bridgeOnline = msg.payload.state == 'online' end
       elseif parts[3] == 'devices' then updateDevices(msg.payload) haveDevices = true
       elseif parts[3] == 'groups' then updateGroups(msg.payload)
       end
@@ -579,8 +640,8 @@ local function outstandingMqttMessage()
         else
           avail = msg.payload.state == 'online'
         end
+        if logging and zigbeeDevices[zigbeeName[friendly]].available ~= avail then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
         zigbeeDevices[zigbeeName[friendly]].available = avail
-        if logging then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
       elseif parts[#parts] == 'set' then -- Do nothing
       elseif parts[#parts] == 'get' then -- Do nothing
       else -- Status update
@@ -596,7 +657,7 @@ local function outstandingMqttMessage()
   mqttMessages = {}
 end
 
-    
+
 -- Reconnect variables
 local warningTimeout = 30
 local timeout = 1
@@ -625,9 +686,6 @@ while true do
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
     end
 
-    -- Process MQTT message buffers synchronously - sends and receives
-    client:loop(mqttTimeout)
-
     if #cbusMessages > 0 then
       -- Send outstanding messages to MQTT
       stat, err = pcall(outstandingCbusMessage)
@@ -638,10 +696,20 @@ while true do
       end
     end
 
+    -- Process MQTT message buffers synchronously - sends and receives
+    client:loop(mqttTimeout)
+
     if #mqttMessages > 0 then
       -- Send outstanding messages to CBus
       stat, err = pcall(outstandingMqttMessage)
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
+    end
+
+    for alias, ignore in pairs(ignoreCbus) do
+      if socket.gettime() - ignore.time > ignoreTimeout then
+        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..tostring(ignoreCbus[alias].expecting)..' was never received - value when set was '..tostring(ignoreCbus[alias].was)) end
+        ignoreCbus[alias] = nil
+      end
     end
   elseif mqttStatus == 2 or not mqttStatus then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
