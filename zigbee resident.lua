@@ -203,6 +203,28 @@ end
 
 
 --[[
+Get the input clusters for a device
+--]]
+local function getClusters(endpoints)
+  local clusters = {}
+  local function getInput(tbl) local k, val for k, val in pairs(tbl) do if type(val) == "table" then getInput(val) end if k == 'input' then local c for _, c in ipairs(val) do clusters[c] = true end end end end
+  getInput(endpoints)
+  return clusters
+end
+
+
+--[[
+Get the configured reportings for a device
+--]]
+local function getReportings(endpoints)
+  local reportings = {}
+  local function getCluster(tbl) local k, val for k, val in pairs(tbl) do if type(val) == "table" then getCluster(val) end if k == 'configured_reportings' then local c for _, c in ipairs(val) do if reportings[c.cluster] == nil then reportings[c.cluster] = {} end reportings[c.cluster][c.attribute] = true end end end end
+  getCluster(endpoints)
+  return reportings
+end
+
+
+--[[
 Create / update / delete ZIGBEE devices
 --]]
 local function cudZig()
@@ -259,17 +281,40 @@ local function cudZig()
       end
       
       local function configureReporting(friendly)
-        if logging then log('Configure reporting for '..alias..' '..friendly) end
         local msg
         local config = 'bridge/request/device/configure_reporting'
-        msg = { id = friendly, cluster='genLevelCtrl', attribute='currentLevel', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
-        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
-        msg = { id = friendly, cluster='genOnOff', attribute = 'onOff', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
-        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
-        msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentX', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
-        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
-        msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentY', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
-        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+        local configured = {}
+        if zigbeeDevices[_L.z].clusters.genLevelCtrl then
+          local exists = zigbeeDevices[_L.z].reporting.genLevelCtrl and zigbeeDevices[_L.z].reporting.genLevelCtrl.currentLevel
+          if not exists then
+            configured[#configured+1] = 'currentLevel'
+            msg = { id = friendly, cluster='genLevelCtrl', attribute='currentLevel', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+        end
+        if zigbeeDevices[_L.z].clusters.genOnOff then
+          local exists = zigbeeDevices[_L.z].reporting.genOnOff and zigbeeDevices[_L.z].reporting.genOnOff.onOff
+          if not exists then
+            configured[#configured+1] = 'onOff'
+            msg = { id = friendly, cluster='genOnOff', attribute = 'onOff', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+        end
+        if zigbeeDevices[_L.z].clusters.lightingColorCtrl then
+          local exists = zigbeeDevices[_L.z].reporting.lightingColorCtrl and zigbeeDevices[_L.z].reporting.lightingColorCtrl.currentX
+          if not exists then
+            configured[#configured+1] = 'currentX'
+            msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentX', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+          local exists = zigbeeDevices[_L.z].reporting.lightingColorCtrl and zigbeeDevices[_L.z].reporting.lightingColorCtrl.currentY
+          if not exists then
+            configured[#configured+1] = 'currentY'
+            msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentY', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+            client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+          end
+        end
+        if logging and hasMembers(configured) then log('Configured reporting for '..alias..' '..friendly..': '..table.concat(configured, ', ')) end
       end
 
       local allow = {
@@ -482,6 +527,8 @@ local function updateDevices(payload)
         local exposes = getExposes(d.definition.exposes)
         local exp = {} local e for e, _ in pairs(exposes) do exp[#exp+1] = e end table.sort(exp) summary[#summary+1] = zigbeeDevices[d.ieee_address].friendly..': '..table.concat(exp, ', ')
         logSummary = true
+        zigbeeDevices[d.ieee_address].clusters = getClusters(d.endpoints)
+        zigbeeDevices[d.ieee_address].reporting = getReportings(d.endpoints)
       end
     end
     ::skip::
