@@ -14,6 +14,7 @@ mqttPassword = ''
 local checkChanges = 15 -- Interval in seconds to check for changes to object keywords (set to nil to disable change checks, recommended once configuration is stable)
 local lighting = { ['56'] = true, } -- Array of applications that are used for lighting
 local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, queue outstanding C-Bus to zigbee messages
+local logExposedSummary = true -- The exposed properties are logged when devices are discovered or updated
 
 local logging = true
 
@@ -108,7 +109,7 @@ local function eventCallback(event)
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
     local target = tonumber(string.sub(event.datahex,3,4),16)
-    if event.meta == 'admin' or event.sender ~= 'cb' then -- A ramp always begins with an admin or non-C-Bus message (like a scene, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
+    if event.meta == 'admin' or event.sender ~= 'cb' then -- A ramp always begins with an admin or non-C-Bus message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
       if ramp > 0 then
         cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
         return
@@ -190,6 +191,18 @@ end
 
 
 --[[
+Get all the exposes value properties for a device
+--]]
+local function getExposes(exposesRaw, prop)
+  if prop == nil then prop = 'property' end
+  local exposes = {}
+  local function getProps(tbl) local val for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[prop] then exposes[val[prop]] = true end end end end
+  getProps(exposesRaw)
+  return exposes
+end
+
+
+--[[
 Create / update / delete ZIGBEE devices
 --]]
 local function cudZig()
@@ -204,7 +217,7 @@ local function cudZig()
   local modCount = 0
   local remCount = 0
   local alias, k, v, stat, err
-  local synonym = { addr = 'z', name = 'n' } -- Synonyms for some keywords, allowing variations
+  local synonym = { addr='z', name='n', exposes='exposed', } -- Synonyms for some keywords, allowing variations
   local special = {} -- special use keywords, e.g. { noavailqueue=true, }
 
   for alias, v in pairs(grps) do
@@ -217,23 +230,15 @@ local function cudZig()
       local _L = {
         n = '',
         z = '',
-        sensor = '',
-        type = '',
+        type = 'number',
         exposed = '', 
         property = 'property',
       }
 
-      local function setupExposed()
-        local function getExposes()
-          local exposes = {}
-          local function getProps(tbl) local val for _, val in pairs(tbl) do if type(val) == "table" then getProps(val) if val[_L.property] then exposes[val[_L.property]] = true end end end end
-          getProps(zigbeeDevices[_L.z].exposesRaw)
-          return exposes
-        end
-
+      local function setupExposed(exposesRaw, prop)
         if zigbeeDevices[_L.z].exposes == nil then
           if zigbeeDevices[_L.z].exposesRaw ~= nil and hasMembers(zigbeeDevices[_L.z].exposesRaw) then
-            zigbeeDevices[_L.z].exposes = getExposes()
+            zigbeeDevices[_L.z].exposes = getExposes(exposesRaw, prop)
           else
             log('Error, device '..alias..', '.._L.z..' has nothing exposed')
             return false
@@ -278,14 +283,14 @@ local function cudZig()
         switch = {setup = function ()
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
-            if not setupExposed() then return false end
+            if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
             return true
           end
         },
         sensor = {setup = function ()
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
-            if not setupExposed() then return false end
+            if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
             return true
           end
         },
@@ -441,6 +446,8 @@ local function updateDevices(payload)
   local d, e, f, new, modified
   local found = {}
   local kill = {}
+  local summary = {}
+  local logSummary = false
   for _, d in ipairs(payload) do
     new = false
     modified = false
@@ -471,11 +478,21 @@ local function updateDevices(payload)
       if not new and modified then
         if logging then log('Update for a device '..d.ieee_address..(d.friendly_name ~= nil and ' (friendly name: '..d.friendly_name..')' or '')) end
       end
+      if new or modified then
+        local exposes = getExposes(d.definition.exposes)
+        local exp = {} local e for e, _ in pairs(exposes) do exp[#exp+1] = e end table.sort(exp) summary[#summary+1] = zigbeeDevices[d.ieee_address].friendly..': '..table.concat(exp, ', ')
+        logSummary = true
+      end
     end
     ::skip::
   end
   for d, _ in pairs(zigbeeDevices) do if not found[d] then kill[d] = true if logging then log('Removed a device '..d) end end end
   for d, _ in pairs(kill) do zigbeeDevices[d] = nil end
+  if logExposedSummary and logSummary and #summary then
+    local sorted = 'Device exposed property summary' sorted = '\n'..sorted..'\n'..string.rep('-', #sorted)
+    table.sort(summary) local s for _, s in ipairs(summary) do sorted = sorted..'\n'..s end
+    log(sorted)
+  end
 end
 
 
