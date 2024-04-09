@@ -259,16 +259,16 @@ local function cudZig()
       end
       
       local function configureReporting(friendly)
+        if logging then log('Configure reporting for '..alias..' '..friendly) end
+        local msg
         local config = 'bridge/request/device/configure_reporting'
-        local msg = {
-          id = friendly,
-          cluster = 'genLevelCtrl',
-          attribute = 'currentLevel',
-          minimum_report_interval = 0,
-          maximum_report_interval = 3600,
-          reportable_change = 1,
-        }
-        if logging then log('Configure reporting for '..alias..' '..friendly..', '..json.encode(msg)) end
+        msg = { id = friendly, cluster='genLevelCtrl', attribute='currentLevel', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+        msg = { id = friendly, cluster='genOnOff', attribute = 'onOff', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+        msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentX', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
+        client:publish(mqttTopic..config, json.encode(msg), QoS, false)
+        msg = { id = friendly, cluster='lightingColorCtrl', attribute = 'currentY', minimum_report_interval=0, maximum_report_interval=3600, reportable_change=0, }
         client:publish(mqttTopic..config, json.encode(msg), QoS, false)
       end
 
