@@ -705,13 +705,13 @@ end
 Send commands subscribed from MQTT to C-Bus
 --]]
 local function outstandingMqttMessage()
+  keep = {}
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
       if parts[3] == 'state' then if logging and bridgeOnline ~= msg.payload.state == 'online' then log('Bridge is '..msg.payload.state) bridgeOnline = msg.payload.state == 'online' end
       elseif parts[3] == 'devices' then updateDevices(msg.payload) haveDevices = true
-      elseif parts[3] == 'groups' then updateGroups(msg.payload) haveGroups = true
-      end
+      elseif parts[3] == 'groups' then if not haveDevices then keep[#keep+1] = msg else updateGroups(msg.payload) haveGroups = true end end -- Must have devices before groups are processed
     else
       local i
       local friendly = {}
@@ -741,7 +741,7 @@ local function outstandingMqttMessage()
       end
     end
   end
-  mqttMessages = {}
+  mqttMessages = keep
 end
 
 
@@ -839,9 +839,9 @@ while true do
     if logging then log('Subscribed '..mqttTopic..'bridge/#') end
     bridgeSubscribed = true
     -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
-    while socket.gettime() - mqttConnected < 1 do
+    while socket.gettime() - mqttConnected < 5 do -- Allow up to five seconds to get retained devices and groups
       localbus:step()
-      client:loop(mqttTimeout)
+      client:loop(0.1)
       if #mqttMessages > 0 then
         stat, err = pcall(outstandingMqttMessage) -- Process outstanding bridge messages
         if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
