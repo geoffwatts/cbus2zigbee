@@ -33,13 +33,13 @@ local zigbee = {}           -- Key is C-Bus alias, contains { class, address, na
 local zigbeeAddress = {}    -- Key is friendly name, contains { alias, net, app, group, channel }, the in-use Zigbee devices (zigbeeDevices contains all discovered devices)
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
-local zigbeeGroups = {}     -- Key is friendly name, contains { available, max, members={}, }
+local zigbeeGroups = {}     -- Key is friendly name, contains { alias, available, max, members={}, }
 local bridgeOnline = true   -- Set to true when the bridge is online
 local haveDevices = false   -- Set to true when bridge/devices update has been processed
 local haveGroups = false    -- Set to true when bridge/groups update has been processed
 local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
-local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops
+local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops, dict of { time }
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, contains expected completion timestamp
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
@@ -120,7 +120,9 @@ local function eventCallback(event)
   else
     value = grp.getvalue(event.dst)
   end
-  if value == zigbee[event.dst].value then return end -- Don't publish if already at the level
+  if zigbee[event.dst].class ~= 'group' then
+    if value == zigbee[event.dst].value then return end -- Don't publish if already at the level (unless a Zigbee group)
+  end
   zigbee[event.dst].value = value
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
   if ramp > 0 then clearMqttSuppress[event.dst] = true end -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
@@ -349,6 +351,7 @@ local function cudZig()
         group = {setup = function ()
             zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.n -- Groups are always addressed by name
+            zigbeeGroups[_L.n].alias = alias -- Assign group to C-Bus address
             return true
           end
         },
@@ -435,6 +438,7 @@ local function cudZig()
         log('Removing '..k..', '..friendly)
         zigbee[k] = nil remCount = remCount + 1
         zigbeeAddress[friendly] = nil
+        zigbeeGroup[friendly] = nil
         client:unsubscribe(mqttTopic..friendly..'/#')
         subscribed[friendly] = nil
         if logging then log('Unsubscribed '..mqttTopic..friendly..'/#') end
@@ -451,6 +455,7 @@ local function cudZig()
       end
     end
   end
+
   -- Log the summary
   if remCount > 0 then log('Removed '..remCount..' Zigbee object'..(remCount ~= 1 and 's' or '')) end
   if addCount > 0 then log('Added '..addCount..' Zigbee object'..(addCount ~= 1 and 's' or '')) end
@@ -482,18 +487,19 @@ local function publish(alias, level, origin, ramp)
     }
   else
     local duration
-    if not zigbee[alias].class == 'group' then
+    if zigbee[alias].class ~= 'group' then
       if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
         local max = zigbeeDevices[zigbee[alias].address].max
         if max ~= nil then if level > max then level = max end end
       end
     else
-      local max = zigbeeGroups[zigbee[alias].address].max
+      local max = zigbeeGroups[zigbee[alias].friendly].max
       if max ~= nil then if level > max then level = max end end
     end
     if ramp > 0 then
       duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
       suppressMqttUpdates[alias] = socket.gettime() + duration + 1 -- Expected completion time with a small buffer
+      if logging then log('Set suppressMqttUpdates for '..alias) end
     else
       duration = nil
     end
@@ -506,9 +512,9 @@ local function publish(alias, level, origin, ramp)
       transition = duration,
     }
   end
-  ignoreMqtt[alias] = true
+  ignoreMqtt[alias] = { time=socket.gettime(), }
   local topic
-  if not zigbee[alias].class == 'group' then
+  if zigbee[alias].class ~= 'group' then
     topic = mqttTopic..zigbeeDevices[zigbee[alias].address].friendly..'/set'
   else
     topic = mqttTopic..zigbee[alias].address..'/set'
@@ -634,15 +640,12 @@ A device has updated status, so send to C-Bus
 local function statusUpdate(alias, friendly, payload)
   if ignoreMqtt[alias] or suppressMqttUpdates[alias] then return end
   ignoreMqtt[alias] = nil
-  local class = zigbee[alias].class
-  local device
-  if class ~= 'group' then
-    if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
-  else
-    device = zigbeeGroups[friendly]
-  end
+  local device if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
   if not device then return end
-  if class == 'switch' then
+  if zigbee[alias].class == 'group' then
+    -- Do nothing. Group objects in C-Bus do not get updated (yet?)...
+    device = zigbeeGroups[friendly]
+  elseif zigbee[alias].class == 'switch' then
     local z
     for _, z in ipairs(device.exposed) do
       local value = payload[z.expose]
@@ -657,7 +660,7 @@ local function statusUpdate(alias, friendly, payload)
         log('Error: Nil value for switch '..z.alias)
       end
     end
-  elseif class == 'sensor' then
+  elseif zigbee[alias].class == 'sensor' then
     local z
     for _, z in ipairs(device.exposed) do
       local value = payload[z.expose]
@@ -798,6 +801,17 @@ while true do
         ignoreCbus[alias] = nil
       end
     end
+    for alias, ignore in pairs(ignoreMqtt) do
+      if not suppressMqttUpdates[alias] then
+        if socket.gettime() - ignore.time > ignoreTimeout then
+          -- Almost every expected MQTT update using opportunistic mode will be an orphan, so don't bother logging it, just clear.
+          -- if logging then log('Warning: Removed orphaned MQTT ignore flag for '..alias) end
+          ignoreMqtt[alias] = nil
+        end
+      else
+        ignore = socket.gettime()
+      end
+    end
   elseif mqttStatus == 2 or not mqttStatus then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
     if bridgeSubscribed then
@@ -857,7 +871,7 @@ while true do
     else -- Resubscribe
       local friendly
       for _, friendly in ipairs(onReconnect) do
-        ignoreMqtt[zigbeeAddress[friendly].alias] = true
+        ignoreMqtt[zigbeeAddress[friendly].alias] = { time=socket.gettime(), }
         client:subscribe(mqttTopic..friendly..'/#', QoS)
         subscribed[friendly] = true
         if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
