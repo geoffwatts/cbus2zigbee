@@ -40,6 +40,7 @@ Add the following:
 * light, to indicate a lighting object (the default type, so optional to specify for lights)
 * switch, to indicate a switching object
 * sensor, to indicate a sensor object
+* group, to indicate a lighting group
 * exposed=exposes_name, to tie a C-Bus object to an exposed Zigbee value (not used for light, exposes= is an alias)
 * type=number|boolean, to specify the data type (sensor only, "number" is the default)
 * parameter=altparameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object (the default is "parameter", not used for light)
@@ -47,7 +48,8 @@ Add the following:
 ### Keyword Examples
 
 * ZIGBEE, light, z=0xa4c1389bf2e3ae5f, 
-* ZIGBEE, light, name=office/office desk strip, 
+* ZIGBEE, light, name=Office/Office desk strip, 
+* ZIGBEE, group, name=Kitchen lights group, 
 * ZIGBEE, sensor, addr=0x00169a00022256da, exposed=humidity, 
 * ZIGBEE, switch, name=3way, exposes=state_l1, 
 
