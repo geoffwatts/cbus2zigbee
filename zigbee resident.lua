@@ -30,7 +30,7 @@ local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
 local zigbee = {}           -- Key is C-Bus alias, contains { class, address, name, net, app, group, channel, keywords, exposed, datatype, value }
-local zigbeeAddress = {}    -- Key is IEEE-address, contains { alias, net, app, group, channel }, the in-use Zigbee devices (zigbeeDevices contains all discovered devices)
+local zigbeeAddress = {}    -- Key is friendly name, contains { alias, net, app, group, channel }, the in-use Zigbee devices (zigbeeDevices contains all discovered devices)
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- Key is friendly name, contains { available, max, members={}, }
@@ -236,6 +236,8 @@ local function cudZig()
 
   local grps = getGroups('ZIGBEE')
   local found = {}
+  local renameError = {}
+  local renamePrevious = {}
   local addCount = 0
   local modCount = 0
   local remCount = 0
@@ -246,10 +248,11 @@ local function cudZig()
   for alias, v in pairs(grps) do
     local modification = false
     found[alias] = true
+    if zigbee[alias] then renamePrevious[alias] = zigbee[alias].friendly end
     local curr = removeIrrelevant(v.keywords)
     if zigbee[alias] and zigbee[alias].keywords ~= curr then modification = true end
     if not zigbee[alias] or modification then
-      zigbee[alias] = { name=v.name, net=v.net, app=v.app, group=v.group, channel=v.channel, keywords=curr, datatype=grp.find(alias).datatype } 
+      zigbee[alias] = { net=v.net, app=v.app, group=v.group, channel=v.channel, keywords=curr, datatype=grp.find(alias).datatype } 
       local _L = {
         n = '',
         z = '',
@@ -320,6 +323,7 @@ local function cudZig()
 
       local allow = {
         light = {setup = function ()
+            zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.z
             stat, err = pcall(configureReporting, zigbeeDevices[_L.z].friendly)
             if not stat then log('Error calling configureReporting(): '..err) end
@@ -327,6 +331,7 @@ local function cudZig()
           end
         },
         switch = {setup = function ()
+            zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
             if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
@@ -334,6 +339,7 @@ local function cudZig()
           end
         },
         sensor = {setup = function ()
+            zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
             if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
@@ -341,7 +347,8 @@ local function cudZig()
           end
         },
         group = {setup = function ()
-            zigbee[alias].address = _L.n
+            zigbee[alias].friendly = _L.n
+            zigbee[alias].address = _L.n -- Groups are always addressed by name
             return true
           end
         },
@@ -356,7 +363,7 @@ local function cudZig()
       if dType ~= 'group' then
         if _L.n ~= '' then
           _L.z = zigbeeName[_L.n]
-          if _L.z == nil then log('Error: Zigbee device with friendly name of '.._L.n..' does not exist, skipping') goto skip end
+          if _L.z == nil then log('Error: Zigbee device with friendly name of '.._L.n..' does not exist, skipping') renameError[alias] = true goto skip end
         end
 
         if not _L.z:find('^0[xX]%x*$') then
@@ -374,7 +381,7 @@ local function cudZig()
           friendly = zigbeeDevices[_L.z].friendly
         end
       else
-        if zigbeeGroups[_L.n] == nil then log('Error: Zigbee group with friendly name of '.._L.n..' does not exist, skipping') goto skip end
+        if zigbeeGroups[_L.n] == nil then log('Error: Zigbee group with friendly name of '.._L.n..' does not exist, skipping') renameError[alias] = true goto skip end
         if not allow[dType].setup() then goto next end
         log('Adding '..dType..' '..alias..', '.._L.n)
         friendly = _L.n
@@ -388,25 +395,24 @@ local function cudZig()
       end
 
       ::next::
-      local ieee
-      if dType ~= 'group' then ieee = _L.z else ieee = _L.n end
-      zigbeeAddress[ieee] = { alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, }
+      zigbeeAddress[_L.n] = { alias=alias, net=v.net, app=v.app, group=v.group, channel=v.channel, }
       ::skip::
     end
   end
 
   -- Handle deletions
   for k, v in pairs(zigbee) do
+    local exposed = v.exposed
+    local address = v.address
+    local friendly = v.friendly
     if not found[k] then
-      local exposed = v.exposed
-      local address = v.address
       local unsub = false
       if v.class ~= 'group' then
         if exposed then
           local i, exp
           for i, exp in pairs(zigbeeDevices[address].exposed) do
             if exposed == exp.expose then
-              log('Removing '..k..' Zigbee '..address..', exposed '..exposed)
+              log('Removing '..k..', '..friendly..', exposed '..exposed)
               zigbeeDevices[address].exposed[i] = nil
               zigbee[k] = nil remCount = remCount + 1
             end
@@ -415,23 +421,33 @@ local function cudZig()
             unsub = true
           end
         else
-          if address ~= nil then
-            log('Removing '..k..' Zigbee '..address)
-            zigbee[k] = nil remCount = remCount + 1
-            unsub = true
-          end
+          log('Removing '..k..', '..friendly)
+          zigbee[k] = nil remCount = remCount + 1
+          unsub = true
         end
         if unsub then
-          zigbeeAddress[address] = nil
-          client:unsubscribe(mqttTopic..address..'/#')
-          subscribed[zigbeeDevices[address].friendly] = nil
-          if logging then log('Unsubscribed '..mqttTopic..zigbeeDevices[address].friendly..'/#') end
+          zigbeeAddress[friendly] = nil
+          client:unsubscribe(mqttTopic..friendly..'/#')
+          subscribed[friendly] = nil
+          if logging then log('Unsubscribed '..mqttTopic..friendly..'/#') end
         end
       else
-        zigbeeAddress[address] = nil
-        client:unsubscribe(mqttTopic..address..'/#')
-        subscribed[address] = nil
-        if logging then log('Unsubscribed '..mqttTopic..address..'/#') end
+        log('Removing '..k..', '..friendly)
+        zigbee[k] = nil remCount = remCount + 1
+        zigbeeAddress[friendly] = nil
+        client:unsubscribe(mqttTopic..friendly..'/#')
+        subscribed[friendly] = nil
+        if logging then log('Unsubscribed '..mqttTopic..friendly..'/#') end
+      end
+    else
+      if zigbee[k] and renamePrevious[k] and renameError[k] then
+        friendly = renamePrevious[k]
+        log('Removing '..k..', '..friendly)
+        zigbee[k] = nil remCount = remCount + 1
+        zigbeeAddress[friendly] = nil
+        client:unsubscribe(mqttTopic..friendly..'/#')
+        subscribed[friendly] = nil
+        if logging then log('Unsubscribed '..mqttTopic..friendly..'/#') end
       end
     end
   end
@@ -660,7 +676,7 @@ local function statusUpdate(alias, friendly, payload)
       end
     end
   else
-    local z if class ~= 'group' then z = zigbeeAddress[zigbeeName[friendly]] else z = zigbeeAddress[friendly] end
+    local z = zigbeeAddress[friendly]
     if payload.brightness then
       if payload.state == 'ON' then
         local value = payload.brightness
@@ -720,11 +736,8 @@ local function outstandingMqttMessage()
       else -- Status update
         local ieee
         local e = #parts for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
-        if not zigbeeGroups[friendly] then ieee = zigbeeName[friendly] else ieee = friendly end
-        if ieee then
-          local alias = zigbeeAddress[ieee].alias
-          statusUpdate(alias, friendly, msg.payload)
-        end
+        local alias = zigbeeAddress[friendly].alias
+        statusUpdate(alias, friendly, msg.payload)
       end
     end
   end
@@ -844,8 +857,7 @@ while true do
     else -- Resubscribe
       local friendly
       for _, friendly in ipairs(onReconnect) do
-          -- TODO groups
-        ignoreMqtt[zigbeeAddress[zigbeeName[friendly]].alias] = true
+        ignoreMqtt[zigbeeAddress[friendly].alias] = true
         client:subscribe(mqttTopic..friendly..'/#', QoS)
         subscribed[friendly] = true
         if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
