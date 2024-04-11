@@ -41,9 +41,9 @@ Add the following:
 * switch, to indicate a switching object
 * sensor, to indicate a sensor object
 * group, to indicate a lighting group
-* exposed=exposes_name, to tie a C-Bus object to an exposed Zigbee value (not used for light, exposes= is an alias)
+* exposed=exposes_name, to tie a C-Bus object to an exposed Zigbee value (sensor/switch only, exposes= is an alias)
 * type=number|boolean, to specify the data type (sensor only, "number" is the default)
-* parameter=altparameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object (the default is "parameter", not used for light)
+* parameter=altparameter, to specify an alternate for a 'parameter' value in the 'exposes' value of a Zigbee object (sensor/switch only, the default is "parameter")
 
 ### Keyword Examples
 
@@ -52,6 +52,10 @@ Add the following:
 * ZIGBEE, group, name=Kitchen lights group, 
 * ZIGBEE, sensor, addr=0x00169a00022256da, exposed=humidity, 
 * ZIGBEE, switch, name=3way, exposes=state_l1, 
+
+### About groups
+
+Zigbee goups are implemented, but only uni-derectionally from C-Bus to Zigbee2Mqtt at this stage, so group object updates will not be seen on C-Bus. The reason is twofold. Firstly, any status change of a Zigbee group member will result in the whole group being updated to match that individual group member. This is somewhat misleading. Secondly, transitioning a Zigbee group to off can result in a blunt "I am off" message immediately being being sent for the Zigbee group, which again is somewhet misleading. Instead, the C-Bus object will not change, rather acting as a conduit for sent Zigbee group commands, and retaining the last command sent as its value.
 
 ## Contributing
 
