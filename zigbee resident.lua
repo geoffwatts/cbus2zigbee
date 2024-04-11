@@ -29,7 +29,7 @@ local init = true           -- Broker initialise
 local reconnect = false     -- Reconnecting to broker
 local QoS = 2               -- Send exactly once
 local subscribed = {}       -- Topics that have been subscribed to
-local zigbee = {}           -- Key is C-Bus alias, contains { class, address, name, net, app, group, channel, keywords, exposed, datatype, value }
+local zigbee = {}           -- Key is C-Bus alias, contains { class, address, name, net, app, group, channel, keywords, exposed, datatype, value, members }
 local zigbeeAddress = {}    -- Key is friendly name, contains { alias, net, app, group, channel }, the in-use Zigbee devices (zigbeeDevices contains all discovered devices)
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
@@ -41,7 +41,7 @@ local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an ar
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops, dict of { time }
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
-local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, contains expected completion timestamp
+local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
 
 local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
@@ -109,6 +109,7 @@ local function eventCallback(event)
   local parts = string.split(event.dst, '/')
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
+    zigbee[event.dst].value = value
     local target = tonumber(string.sub(event.datahex,3,4),16)
     if event.meta == 'admin' or event.sender ~= 'cb' then -- A ramp always begins with an admin or non-C-Bus message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
       if ramp > 0 then
@@ -119,13 +120,17 @@ local function eventCallback(event)
     if value ~= target then return end -- Ignore intermediate level changes during a ramp
   else
     value = grp.getvalue(event.dst)
+    zigbee[event.dst].value = value
   end
   if zigbee[event.dst].class ~= 'group' then
     if value == zigbee[event.dst].value then return end -- Don't publish if already at the level (unless a Zigbee group)
   end
-  zigbee[event.dst].value = value
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
-  if ramp > 0 then clearMqttSuppress[event.dst] = true end -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
+  if ramp > 0 then  -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
+    clearMqttSuppress[event.dst] = true
+    -- Also clear group member suppression if they exist
+    if zigbee[event.dst].members ~= nil then local m for _, m in ipairs(zigbee[event.dst].members) do clearMqttSuppress[m] = true end end
+  end
 end
 
 local localbus = require('localbus').new(busTimeout) -- Set up the localbus
@@ -352,6 +357,7 @@ local function cudZig()
             zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.n -- Groups are always addressed by name
             zigbeeGroups[_L.n].alias = alias -- Assign group to C-Bus address
+            local m zigbee[alias].members = {} for _, m in ipairs(zigbeeGroups[_L.n].members) do zigbee[alias].members[#zigbee[alias].members+1] = zigbeeAddress[zigbeeDevices[m].friendly].alias end -- Lookup the member aliases
             return true
           end
         },
@@ -498,14 +504,21 @@ local function publish(alias, level, origin, ramp)
     end
     if ramp > 0 then
       duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
-      suppressMqttUpdates[alias] = socket.gettime() + duration + 1 -- Expected completion time with a small buffer
+      suppressMqttUpdates[alias] = { time=socket.gettime() + duration + 1, target=level, } -- Expected completion time with a small buffer
       if logging then log('Set suppressMqttUpdates for '..alias) end
+      if zigbee[alias].class == 'group' then
+        for _, m in ipairs(zigbee[alias].members) do
+          suppressMqttUpdates[m] = { time=socket.gettime() + duration + 1, target=level, } -- Expected completion time with a small buffer
+          if logging then log('Set suppressMqttUpdates for '..m) end
+        end
+      end
     else
       duration = nil
     end
     local state = (level ~= 0) and 'ON' or 'OFF'
     local brightness = (state == 'ON' or (duration ~= nil and duration > 0)) and level or nil
     if duration ~= nil and duration > 0 and level == 0 then state = nil end
+    if duration == 0 then duration = nil end
     msg = {
       brightness = brightness,
       state = state,
@@ -767,7 +780,13 @@ while true do
 
   -- Clean up expired transition suppressions
   local status, finish
-  for alias, finish in pairs(suppressMqttUpdates) do if socket.gettime() > finish then suppressMqttUpdates[alias] = nil if logging then log('Expired transition for '..alias) end end end
+  for alias, finish in pairs(suppressMqttUpdates) do
+    if socket.gettime() > finish.time then
+      suppressMqttUpdates[alias] = nil if logging then log('Expired suppressMqttUpdates for '..alias) end
+      ignoreMqtt[alias] = { time=socket.gettime(), }
+      grp.write(alias, finish.target)
+    end
+  end
   
   if mqttStatus == 1 then
     local t = socket.gettime()
