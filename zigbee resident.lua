@@ -42,6 +42,7 @@ local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains a
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops, dict of { time }
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
+local suppressCbusUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
 
 local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
@@ -117,14 +118,12 @@ local function eventCallback(event)
         return
       end
     end
-    if value ~= target then return end -- Ignore intermediate level changes during a ramp
+    if ramp > 0 and value ~= target then return end -- Ignore intermediate level changes during a ramp
   else
     value = grp.getvalue(event.dst)
     zigbee[event.dst].value = value
   end
-  if zigbee[event.dst].class ~= 'group' then
-    if value == origin then return end -- Don't publish if already at the level (unless a Zigbee group)
-  end
+  if value == origin then return end -- Don't publish if already at the level (unless a Zigbee group)
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
   if ramp > 0 then  -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
     clearMqttSuppress[event.dst] = true
@@ -507,8 +506,12 @@ local function publish(alias, level, origin, ramp)
       if logging then log('Set suppressMqttUpdates for '..alias) end
       if zigbee[alias].class == 'group' then
         for _, m in ipairs(zigbee[alias].members) do
+          duration = math.abs(level - zigbee[m].value) / 256 * ramp -- Duration for group members is calculated from the member current levels
           suppressMqttUpdates[m] = { time=socket.gettime() + duration + 1, target=level, } -- Expected completion time with a small buffer
+          suppressCbusUpdates[m] = suppressMqttUpdates[m]
           if logging then log('Set suppressMqttUpdates for '..m) end
+          if logging then log('Ramp group member '..m..' from '..zigbee[m].value..' to '..level..', rate '..ramp..'='..duration..' seconds') end
+          SetCBusLevel(zigbee[m].net, zigbee[m].app, zigbee[m].group, level, ramp) -- Ramp the C-Bus members to match
         end
       end
     else
@@ -543,6 +546,7 @@ Receive commands from C-Bus and publish to MQTT
 local function outstandingCbusMessage()
   local keep = {}
   for _, cmd in ipairs(cbusMessages) do
+    if suppressCbusUpdates[cmd.alias] then goto next end
     if ignoreCbus[cmd.alias] ~= nil and cmd.level == ignoreCbus[cmd.alias].expecting then ignoreCbus[cmd.alias] = nil goto next end
     if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
     ::next::
@@ -777,13 +781,19 @@ while true do
 
   localbus:step()
 
-  -- Clean up expired transition suppressions
+  -- Clean up expired transition suppressions for MQTT and C-Bus
   local status, finish
   for alias, finish in pairs(suppressMqttUpdates) do
     if socket.gettime() > finish.time then
       suppressMqttUpdates[alias] = nil if logging then log('Expired suppressMqttUpdates for '..alias) end
+      clearMqttSuppress[alias] = nil
       ignoreMqtt[alias] = { time=socket.gettime(), }
       grp.write(alias, finish.target)
+    end
+  end
+  for alias, finish in pairs(suppressCbusUpdates) do
+    if socket.gettime() > finish.time then
+      suppressCbusUpdates[alias] = nil if logging then log('Expired suppressCbusUpdates for '..alias) end
     end
   end
   
