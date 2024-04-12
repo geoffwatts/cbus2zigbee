@@ -104,7 +104,6 @@ C-Bus events (queues transitions at the start of a ramp, with status queued also
 local function eventCallback(event)
   if not zigbee[event.dst] then return end
   local value
-  local oldValue = zigbee[event.dst].value
   local origin = zigbee[event.dst].value
   local ramp = tonumber(string.sub(event.datahex,7,8),16)
   local parts = string.split(event.dst, '/')
@@ -124,7 +123,7 @@ local function eventCallback(event)
     zigbee[event.dst].value = value
   end
   if zigbee[event.dst].class ~= 'group' then
-    if value == oldValue then return end -- Don't publish if already at the level (unless a Zigbee group)
+    if value == origin then return end -- Don't publish if already at the level (unless a Zigbee group)
   end
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
   if ramp > 0 then  -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
@@ -823,7 +822,7 @@ while true do
     for alias, ignore in pairs(ignoreMqtt) do
       if not suppressMqttUpdates[alias] then
         if socket.gettime() - ignore.time > ignoreTimeout then
-          -- Almost every expected MQTT update using opportunistic mode will be an orphan, so don't bother logging it, just clear.
+          -- Almost every expected MQTT update using optimistic mode will be an orphan, so don't bother logging it, just clear.
           -- if logging then log('Warning: Removed orphaned MQTT ignore flag for '..alias) end
           ignoreMqtt[alias] = nil
         end
