@@ -91,6 +91,7 @@ client.ON_DISCONNECT = function()
   mqttStatus = 2
   init = true
   reconnect = true
+  bridgeOnline = false
 end
 
 client.ON_MESSAGE = function(mid, topic, payload)
@@ -328,37 +329,41 @@ local function cudZig()
       end
 
       local allow = {
-        light = {setup = function ()
+        light = {
+          setup = function ()
             zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.z
             stat, err = pcall(configureReporting, zigbeeDevices[_L.z].friendly)
             if not stat then log('Error calling configureReporting(): '..err) end
             return true
-          end
+          end,
         },
-        switch = {setup = function ()
+        switch = {
+          setup = function ()
             zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
             if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
             return true
-          end
+          end,
         },
-        sensor = {setup = function ()
+        sensor = {
+          setup = function ()
             zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.z
             if _L.exposed == '' then log('Keyword error, device '..alias..', '.._L.z..' does not have an exposed= keyword, skipping') return false end
             if not setupExposed(zigbeeDevices[_L.z].exposesRaw, _L.property) then return false end
             return true
-          end
+          end,
         },
-        group = {setup = function ()
+        group = {
+          setup = function ()
             zigbee[alias].friendly = _L.n
             zigbee[alias].address = _L.n -- Groups are always addressed by name
             zigbeeGroups[_L.n].alias = alias -- Assign group to C-Bus address
             local m zigbee[alias].members = {} for _, m in ipairs(zigbeeGroups[_L.n].members) do zigbee[alias].members[#zigbee[alias].members+1] = zigbeeAddress[zigbeeDevices[m].friendly].alias end -- Lookup the member aliases
             return true
-          end
+          end,
         },
       }
 
@@ -643,7 +648,6 @@ local function updateGroups(payload)
         zigbeeGroups[g.friendly_name].max = zigbeeDevices[first].max
       end
     end
-    -- Scenes TO DO
   end
   for g, _ in pairs(zigbeeGroups) do if not found[g] then kill[g] = true if logging then log('Removed a group '..g) end end end
   for g, _ in pairs(kill) do zigbeeGroups[g] = nil end
@@ -764,24 +768,10 @@ local function outstandingMqttMessage()
 end
 
 
--- Reconnect variables
-local warningTimeout = 30
-local timeout = 1
-local timeoutStart, connectStart, mqttConnected
-local onReconnect = {}
-local bridgeSubscribed = false
-
-local changesChecked
-local reportOutstandingEvery = 300 -- If there are outstanding C-Bus messages in the queue, log at intervals (if logging is enabled)
-local outstandingLogged = socket.gettime() - reportOutstandingEvery
-
--- Main loop: Process both C-Bus and Mosquitto broker messages
-while true do
-  local stat, err
-
-  localbus:step()
-
-  -- Clean up expired transition suppressions for MQTT and C-Bus
+--[[
+Clean up expired transition suppressions and orphaned flags for MQTT and C-Bus
+--]]
+local function expireOrphans()
   local status, finish
   for alias, finish in pairs(suppressMqttUpdates) do
     if socket.gettime() > finish.time then
@@ -796,49 +786,71 @@ while true do
       suppressCbusUpdates[alias] = nil if logging then log('Expired suppressCbusUpdates for '..alias) end
     end
   end
-  
+  for alias, ignore in pairs(ignoreCbus) do
+    if socket.gettime() - ignore.time > ignoreTimeout then
+      if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..tostring(ignoreCbus[alias].expecting)..' was never received - value when set was '..tostring(ignoreCbus[alias].was)) end
+      ignoreCbus[alias] = nil
+    end
+  end
+  for alias, ignore in pairs(ignoreMqtt) do
+    if not suppressMqttUpdates[alias] then
+      if socket.gettime() - ignore.time > ignoreTimeout then
+        -- Almost every expected MQTT update using optimistic mode will become an orphan, so don't bother logging it, just clear.
+        ignoreMqtt[alias] = nil
+      end
+    else
+      ignore = socket.gettime()
+    end
+  end
+end
+
+
+--[[
+Main loop
+Process both C-Bus and Mosquitto broker messages
+--]]
+
+-- Reconnect variables
+local warningTimeout = 30
+local timeout = 1
+local timeoutStart, connectStart, mqttConnected
+local onReconnect = {}
+local bridgeSubscribed = false
+
+local changesChecked
+local reportOutstandingEvery = 300 -- If there are outstanding C-Bus messages in the queue, log at intervals (if logging is enabled)
+local outstandingLogged = socket.gettime() - reportOutstandingEvery
+
+while true do
+  local stat, err
+
+  localbus:step()
+
+  -- Send outstanding messages to MQTT (messages are queued if bridge is offline)
+  if #cbusMessages > 0 then
+    stat, err = pcall(outstandingCbusMessage)
+    if not stat then log('Error processing outstanding CBus messages: '..err) cbusMessages = {} end -- Log error and clear the queue, continue
+    if logging and #cbusMessages > 0 and socket.gettime() - outstandingLogged > reportOutstandingEvery then
+      outstandingLogged = socket.gettime()
+      log(#cbusMessages..' outstanding message'..(#cbusMessages > 1 and 's' or '')..', device(s) are offline')
+    end
+  end
+
   if mqttStatus == 1 then
+    -- Process MQTT message buffers synchronously - sends and receives
+    client:loop(mqttTimeout)
+
+    -- Send outstanding messages to CBus
+    if #mqttMessages > 0 then
+      stat, err = pcall(outstandingMqttMessage)
+      if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
+    end
+    
+    -- Create/update/delete
     local t = socket.gettime()
     if checkChanges and t > changesChecked + checkChanges then
       changesChecked = t
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
-    end
-
-    if #cbusMessages > 0 then
-      -- Send outstanding messages to MQTT
-      stat, err = pcall(outstandingCbusMessage)
-      if not stat then log('Error processing outstanding CBus messages: '..err) cbusMessages = {} end -- Log error and clear the queue, continue
-      if logging and #cbusMessages > 0 and socket.gettime() - outstandingLogged > reportOutstandingEvery then
-        outstandingLogged = socket.gettime()
-        log(#cbusMessages..' outstanding message'..(#cbusMessages > 1 and 's' or '')..', device(s) are offline')
-      end
-    end
-
-    -- Process MQTT message buffers synchronously - sends and receives
-    client:loop(mqttTimeout)
-
-    if #mqttMessages > 0 then
-      -- Send outstanding messages to CBus
-      stat, err = pcall(outstandingMqttMessage)
-      if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
-    end
-
-    for alias, ignore in pairs(ignoreCbus) do
-      if socket.gettime() - ignore.time > ignoreTimeout then
-        if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..tostring(ignoreCbus[alias].expecting)..' was never received - value when set was '..tostring(ignoreCbus[alias].was)) end
-        ignoreCbus[alias] = nil
-      end
-    end
-    for alias, ignore in pairs(ignoreMqtt) do
-      if not suppressMqttUpdates[alias] then
-        if socket.gettime() - ignore.time > ignoreTimeout then
-          -- Almost every expected MQTT update using optimistic mode will be an orphan, so don't bother logging it, just clear.
-          -- if logging then log('Warning: Removed orphaned MQTT ignore flag for '..alias) end
-          ignoreMqtt[alias] = nil
-        end
-      else
-        ignore = socket.gettime()
-      end
     end
   elseif mqttStatus == 2 or not mqttStatus then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
@@ -911,5 +923,8 @@ while true do
     do return end
   end
 
+  stat, err = pcall(expireOrphans)
+  if not stat then log('Error expiring orphans: '..err) end
+  
   ::next::
 end
