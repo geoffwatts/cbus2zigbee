@@ -48,7 +48,7 @@ local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression s
 local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
 
 local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in create/update/delete function to exclude unrelated keywords for change detection
-  'ZIGBEE', 'light', 'switch', 'sensor', 'group', 'name=', 'n=', 'addr=', 'z=', 'type=', 'exposed=', 'property=', 
+  'ZIGBEE', 'light', 'switch', 'sensor', 'group', 'name=', 'n=', 'addr=', 'z=', 'type=', 'exposed=', 'exposes=', 'property=', 
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
