@@ -1,10 +1,10 @@
-# Clipsal C-Bus Automation Controller Integration with Zigbee2MQTT
+# C-Bus Automation Controller Integration with Zigbee2MQTT
 
 ## Overview
 
-This project provides integration between Clipsal C-Bus automation controllers and Zigbee2MQTT.
+This project provides integration between Clipsal/Schneider Electric C-Bus automation controllers and Zigbee2MQTT.
 
-The integration consists of a single resident script, which listens for both C-Bus level changes and Mosquitto broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects.
+The integration consists of a single resident script, which listens for both C-Bus level changes and MQTT broker messages, sending messages bidirectionally. Changes to C-Bus will set the Zigbee devices, and Zigbee status changes will set C-Bus objects.
 
 Lighting group, measurement app and user parameters are implemented.
 
@@ -12,9 +12,9 @@ Lighting group, measurement app and user parameters are implemented.
 
 ### Prerequisites
 
-- Clipsal C-Bus automation controller (SHAC, NAC, AC2, NAC2).
+- Clipsal/Schneider C-Bus automation controller (SHAC, NAC, AC2, NAC2).
 - Zigbee2mqtt instance running on a compatible device (e.g., Raspberry Pi, Home Assistant add-in) in the same network as the C-Bus controller.
-- Mosquitto broker (such as Mosquitto, Home Assistant add-in) accessible to both the C-Bus controller and Zigbee2MQTT.
+- MQTT broker (such as Eclipse, Home Assistant add-in, etc.) accessible to both the C-Bus controller and Zigbee2MQTT.
 
 ### Installation Steps
 
