@@ -42,7 +42,7 @@ local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains a
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops, dict of { time }
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
-local suppressCbusUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
+local suppressCbusUpdates = {} -- Suppress status updates to MQTT during transitions, key is alias, dict of { target, time }
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
 
 local cbusMeasurementUnits = { temperature=0, humidity=0x1a, current=1, frequency=7, voltage=0x24, power=0x26, energy=0x25, }
@@ -124,7 +124,7 @@ local function eventCallback(event)
     value = grp.getvalue(event.dst)
     zigbee[event.dst].value = value
   end
-  if value == origin then return end -- Don't publish if already at the level (unless a Zigbee group)
+  if value == origin and zigbee[event.dst].class ~= 'group' then return end -- Don't publish if already at the level (unless a Zigbee group)
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
   if ramp > 0 then  -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
     clearMqttSuppress[event.dst] = true
