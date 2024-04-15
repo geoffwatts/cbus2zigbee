@@ -845,14 +845,14 @@ local function brokerConnect()
     do return end
   end
   while mqttStatus ~= 1 do
-    client:loop(1) -- Service the client on startup with a generous timeout
+    client:loop(0.1) -- Service the client on startup
     if socket.gettime() - connectStart > timeout then
       if socket.gettime() - timeoutStart > warningTimeout then
         log('Failed to connect to the Mosquitto broker, retrying continuously')
         timeoutStart = socket.gettime()
       end
       connectStart = socket.gettime()
-      return false -- Exit to the main loop to keep localbus messages monitored
+      return false
     end
   end
   mqttConnected = socket.gettime()
@@ -929,7 +929,7 @@ while true do
   elseif mqttStatus == 2 then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect (on err equal to false) then retry.
     stat, err = pcall(brokerConnect)
-    if not stat then log('Error in brokerConnect(): '..err) sleep(60) else if err == false then goto next end end
+    if not stat then log('Error in brokerConnect(): '..err) sleep(60) else if err == false then goto next end end -- If cannot connect then exit to the main loop to keep localbus messages monitored
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
     do return end
