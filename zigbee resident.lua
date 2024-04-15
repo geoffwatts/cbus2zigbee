@@ -73,6 +73,18 @@ end
 local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether a table has any members
 local function sleep(sec) socket.select(nil, nil, sec) end
 
+local function equals(o1, o2, ignoreMt) -- Compare two variables (simple, tables, anything). Default ignore metatables.
+  if ignoreMt == nil then ignoreMt = true end
+  if o1 == o2 then return true end
+  local o1Type = type(o1) local o2Type = type(o2)
+  if o1Type ~= o2Type then return false end if o1Type ~= 'table' then return false end
+  if not ignoreMt then local mt1 = getmetatable(o1) if mt1 and mt1.__eq then return o1 == o2 end end
+  local keySet = {}
+  for key1, value1 in pairs(o1) do local value2 = o2[key1] if value2 == nil or equals(value1, value2, ignoreMt) == false then return false end keySet[key1] = true end
+  for key2, _ in pairs(o2) do if not keySet[key2] then return false end end
+  return true
+end
+
 
 --[[
 Create Mosquitto client and callbacks
@@ -624,7 +636,7 @@ end
 Available groups has changed
 --]]
 local function updateGroups(payload)
-  local g, m, new, modified
+  local g, m, new, modified, oldMembers
   local found = {}
   local kill = {}
   for _, g in ipairs(payload) do
@@ -637,8 +649,8 @@ local function updateGroups(payload)
       if logging then log('Found a group '..g.friendly_name) end
     else
       modified = true
+      oldMembers = zigbeeGroups[g.friendly_name].members
       zigbeeGroups[g.friendly_name].members = {}
-      if logging then log('Update for a group '..g.friendly_name) end
     end
     for _, m in ipairs(g.members) do
       zigbeeGroups[g.friendly_name].members[#zigbeeGroups[g.friendly_name].members+1] = m.ieee_address
@@ -648,7 +660,9 @@ local function updateGroups(payload)
       if hasMembers(zigbeeDevices) and zigbeeDevices[first] then
         zigbeeGroups[g.friendly_name].max = zigbeeDevices[first].max
       end
+      if equals(zigbeeGroups[g.friendly_name].members, oldMembers) then modified = false end
     end
+    if logging and modified then log('Update for a group '..g.friendly_name) end
   end
   for g, _ in pairs(zigbeeGroups) do if not found[g] then kill[g] = true if logging then log('Removed a group '..g) end end end
   for g, _ in pairs(kill) do zigbeeGroups[g] = nil end
@@ -831,7 +845,7 @@ local function brokerConnect()
   end
   for friendly, _ in pairs(subscribed) do
     client:unsubscribe(mqttTopic..friendly..'/#', QoS)
-    if logging then log('Unubscribed '..mqttTopic..friendly..'/#') end
+    if logging then log('Unsubscribed '..mqttTopic..friendly..'/#') end
     onReconnect[#onReconnect + 1] = friendly
     subscribed[friendly] = nil
   end
@@ -900,9 +914,8 @@ Process both C-Bus and Mosquitto broker messages
 while true do
   local stat, err
 
-  localbus:step()
-
   -- Send outstanding messages to MQTT (messages are queued if bridge is offline)
+  localbus:step()
   if #cbusMessages > 0 then
     stat, err = pcall(outstandingCbusMessage)
     if not stat then log('Error processing outstanding CBus messages: '..err) cbusMessages = {} end -- Log error and clear the queue, continue
@@ -913,10 +926,8 @@ while true do
   end
 
   if mqttStatus == 1 then
-    -- Process MQTT message buffers synchronously - sends and receives
-    client:loop(mqttTimeout)
-
     -- Send outstanding messages to CBus
+    client:loop(mqttTimeout)
     if #mqttMessages > 0 then
       stat, err = pcall(outstandingMqttMessage)
       if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
@@ -926,7 +937,8 @@ while true do
     local t = socket.gettime()
     if checkChanges and t > changesChecked + checkChanges then
       changesChecked = t
-      stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
+      stat, err = pcall(cudZig)
+      if not stat then log('Error in cudZig(): '..err) end
     end
   elseif mqttStatus == 2 then
     -- Broker is disconnected, so attempt a connection, waiting. If fail to connect (on err equal to false) then retry.
