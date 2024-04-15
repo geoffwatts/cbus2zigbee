@@ -34,7 +34,7 @@ local zigbeeAddress = {}    -- Key is friendly name, contains { alias, net, app,
 local zigbeeDevices = {}    -- Key is IEEE-address, contains { class, friendly, max, exposesRaw, exposes, exposed={ {expose, type, alias, net, app, group, channel}, ... } }
 local zigbeeName = {}       -- Key is friendly name, contains IEEE-address
 local zigbeeGroups = {}     -- Key is friendly name, contains { alias, available, max, members={}, }
-local bridgeOnline = true   -- Set to true when the bridge is online
+local bridgeOnline = false  -- Set to true when the bridge is online
 local haveDevices = false   -- Set to true when bridge/devices update has been processed
 local haveGroups = false    -- Set to true when bridge/groups update has been processed
 local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an array of { alias, level, origin, ramp }
@@ -87,7 +87,7 @@ end
 
 
 --[[
-Create Mosquitto client and callbacks
+Mosquitto client and callbacks
 --]]
 local client = require("mosquitto").new(mqttClientId)
 if mqttUsername and mqttUsername ~= '' then client:login_set(mqttUsername, mqttPassword) end
@@ -747,7 +747,9 @@ local function outstandingMqttMessage()
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
-      if parts[3] == 'state' then if logging and bridgeOnline ~= msg.payload.state == 'online' then log('Bridge is '..msg.payload.state) bridgeOnline = msg.payload.state == 'online' end
+      if parts[3] == 'state' then
+        if logging and bridgeOnline ~= (msg.payload.state == 'online') then log('Bridge is '..msg.payload.state) end
+        bridgeOnline = msg.payload.state == 'online'
       elseif parts[3] == 'devices' then updateDevices(msg.payload) haveDevices = true
       elseif parts[3] == 'groups' then if not haveDevices then keep[#keep+1] = msg else updateGroups(msg.payload) haveGroups = true end end -- Must have devices before groups are processed
     else
