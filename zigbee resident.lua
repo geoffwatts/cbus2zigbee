@@ -71,6 +71,7 @@ local function removeIrrelevant(keywords)
 end
 
 local function hasMembers(tbl) for _, _ in pairs(tbl) do return true end return false end -- Get whether a table has any members
+local function sleep(sec) socket.select(nil, nil, sec) end
 
 
 --[[
@@ -728,7 +729,7 @@ end
 Send commands subscribed from MQTT to C-Bus
 --]]
 local function outstandingMqttMessage()
-  keep = {}
+  local keep = {}
   for _, msg in ipairs(mqttMessages) do
     local parts = msg.topic:split('/')
     if parts[2] == 'bridge' then
@@ -757,7 +758,6 @@ local function outstandingMqttMessage()
       elseif parts[#parts] == 'set' then -- Do nothing
       elseif parts[#parts] == 'get' then -- Do nothing
       else -- Status update
-        local ieee
         local e = #parts for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
         local alias = zigbeeAddress[friendly].alias
         statusUpdate(alias, friendly, msg.payload)
@@ -806,11 +806,9 @@ end
 
 
 --[[
-Main loop
-Process both C-Bus and Mosquitto broker messages
+Connect to MQTT broker
 --]]
 
--- Reconnect variables
 local warningTimeout = 30
 local timeout = 1
 local timeoutStart, connectStart, mqttConnected
@@ -820,6 +818,82 @@ local bridgeSubscribed = false
 local changesChecked
 local reportOutstandingEvery = 300 -- If there are outstanding C-Bus messages in the queue, log at intervals (if logging is enabled)
 local outstandingLogged = socket.gettime() - reportOutstandingEvery
+
+local function brokerConnect()
+  local stat, err
+
+  if bridgeSubscribed then
+    client:unsubscribe(mqttTopic..'bridge/#', QoS)
+    bridgeSubscribed = false
+  if logging then log('Unsubscribed '..mqttTopic..'bridge/#') end
+  end
+  for friendly, _ in pairs(subscribed) do
+    client:unsubscribe(mqttTopic..friendly..'/#', QoS)
+    if logging then log('Unubscribed '..mqttTopic..friendly..'/#') end
+    onReconnect[#onReconnect + 1] = friendly
+    subscribed[friendly] = nil
+  end
+  if init then
+    log('Connecting to Mosquitto broker')
+    timeoutStart = socket.gettime()
+    connectStart = timeoutStart
+    init = false
+  end
+  stat, err = pcall(function (b, p, k) client:connect(b, p, k) end, mqttBroker, 1883, 25) -- Requested keep-alive 25 seconds, broker at port 1883
+  if not stat then -- Log and abort
+    log('Error calling connect to broker: '..err)
+    do return end
+  end
+  while mqttStatus ~= 1 do
+    client:loop(1) -- Service the client on startup with a generous timeout
+    if socket.gettime() - connectStart > timeout then
+      if socket.gettime() - timeoutStart > warningTimeout then
+        log('Failed to connect to the Mosquitto broker, retrying continuously')
+        timeoutStart = socket.gettime()
+      end
+      connectStart = socket.gettime()
+      return false -- Exit to the main loop to keep localbus messages monitored
+    end
+  end
+  mqttConnected = socket.gettime()
+  -- Subscribe to bridge topics
+  client:subscribe(mqttTopic..'bridge/#', QoS)
+  if logging then log('Subscribed '..mqttTopic..'bridge/#') end
+  bridgeSubscribed = true
+  -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
+  while socket.gettime() - mqttConnected < 5 do -- Allow up to five seconds to get retained devices and groups
+    localbus:step()
+    client:loop(0.1)
+    if #mqttMessages > 0 then
+      stat, err = pcall(outstandingMqttMessage) -- Process outstanding bridge messages
+      if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
+    end
+    if haveDevices and haveGroups then break end
+  end
+  if not haveDevices then log('Error: Bridge devices not yet retrieved, proceeding anyway') end
+  if not haveGroups then log('Error: Bridge groups not yet retrieved, proceeding anyway') end
+  if not reconnect then -- Initial create/update/delete
+    stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
+    changesChecked = socket.gettime()
+    outstandingLogged = changesChecked
+  else -- Resubscribe
+    local friendly
+    for _, friendly in ipairs(onReconnect) do
+      ignoreMqtt[zigbeeAddress[friendly].alias] = { time=socket.gettime(), }
+      client:subscribe(mqttTopic..friendly..'/#', QoS)
+      subscribed[friendly] = true
+      if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
+    end
+    onReconnect = {}
+  end
+  return true
+end
+
+
+--[[
+Main loop
+Process both C-Bus and Mosquitto broker messages
+--]]
 
 while true do
   local stat, err
@@ -852,72 +926,10 @@ while true do
       changesChecked = t
       stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
     end
-  elseif mqttStatus == 2 or not mqttStatus then
-    -- Broker is disconnected, so attempt a connection, waiting. If fail to connect then retry.
-    if bridgeSubscribed then
-      client:unsubscribe(mqttTopic..'bridge/#', QoS)
-      bridgeSubscribed = false
-    if logging then log('Unsubscribed '..mqttTopic..'bridge/#') end
-    end
-    for friendly, _ in pairs(subscribed) do
-      client:unsubscribe(mqttTopic..friendly..'/#', QoS)
-      if logging then log('Unubscribed '..mqttTopic..friendly..'/#') end
-      onReconnect[#onReconnect + 1] = friendly
-      subscribed[friendly] = nil
-    end
-    if init then
-      log('Connecting to Mosquitto broker')
-      timeoutStart = socket.gettime()
-      connectStart = timeoutStart
-      init = false
-    end
-    stat, err = pcall(function (b, p, k) client:connect(b, p, k) end, mqttBroker, 1883, 25) -- Requested keep-alive 25 seconds, broker at port 1883
-    if not stat then -- Log and abort
-      log('Error calling connect to broker: '..err)
-      do return end
-    end
-    while mqttStatus ~= 1 do
-      client:loop(1) -- Service the client on startup with a generous timeout
-      if socket.gettime() - connectStart > timeout then
-        if socket.gettime() - timeoutStart > warningTimeout then
-          log('Failed to connect to the Mosquitto broker, retrying continuously')
-          timeoutStart = socket.gettime()
-        end
-        connectStart = socket.gettime()
-        goto next -- Exit to the main loop to keep localbus messages monitored
-      end
-    end
-    mqttConnected = socket.gettime()
-    -- Subscribe to bridge topics
-    client:subscribe(mqttTopic..'bridge/#', QoS)
-    if logging then log('Subscribed '..mqttTopic..'bridge/#') end
-    bridgeSubscribed = true
-    -- Connected... Now loop briefly to allow retained value retrieval for the bridge first (because synchronous), which will ensure all mqttDevices get created before device topics are processed
-    while socket.gettime() - mqttConnected < 5 do -- Allow up to five seconds to get retained devices and groups
-      localbus:step()
-      client:loop(0.1)
-      if #mqttMessages > 0 then
-        stat, err = pcall(outstandingMqttMessage) -- Process outstanding bridge messages
-        if not stat then log('Error processing outstanding MQTT messages: '..err) mqttMessages = {} end -- Log error and clear the queue
-      end
-      if haveDevices and haveGroups then break end
-    end
-    if not haveDevices then log('Error: Bridge devices not yet retrieved, proceeding anyway') end
-    if not haveGroups then log('Error: Bridge groups not yet retrieved, proceeding anyway') end
-    if not reconnect then -- Initial create/update/delete
-      stat, err = pcall(cudZig) if not stat then log('Error in cudZig(): '..err) end
-      changesChecked = socket.gettime()
-      outstandingLogged = changesChecked
-    else -- Resubscribe
-      local friendly
-      for _, friendly in ipairs(onReconnect) do
-        ignoreMqtt[zigbeeAddress[friendly].alias] = { time=socket.gettime(), }
-        client:subscribe(mqttTopic..friendly..'/#', QoS)
-        subscribed[friendly] = true
-        if logging then log('Subscribed '..mqttTopic..friendly..'/#') end
-      end
-      onReconnect = {}
-    end
+  elseif mqttStatus == 2 then
+    -- Broker is disconnected, so attempt a connection, waiting. If fail to connect (on err equal to false) then retry.
+    stat, err = pcall(brokerConnect)
+    if not stat then log('Error in brokerConnect(): '..err) sleep(60) else if err == false then goto next end end
   else
     log('Error: Invalid mqttStatus: '..mqttStatus)
     do return end
