@@ -743,17 +743,19 @@ local function outstandingMqttMessage()
       if parts[#parts] == 'availability' then
         local avail = false
         local e = #parts - 1 for i = s, e do friendly[#friendly + 1] = parts[i] end friendly = table.concat(friendly, '/') -- Find the friendly name
-        if type(msg.payload) == 'string' then -- Legacy mode
-          avail = msg.payload == 'online'
-        else
-          avail = msg.payload.state == 'online'
-        end
-        if not zigbeeGroups[friendly] then
-          if logging and zigbeeDevices[zigbeeName[friendly]].available ~= avail then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
-          zigbeeDevices[zigbeeName[friendly]].available = avail
-        else
-          if logging and zigbeeGroups[friendly].available ~= avail then log('Group '..friendly..(avail and ' is available' or ' is NOT available')) end
-          zigbeeGroups[friendly].available = avail
+        if friendly ~= 'Coordinator' then
+          if type(msg.payload) == 'string' then -- Legacy mode
+            avail = msg.payload == 'online'
+          else
+            avail = msg.payload.state == 'online'
+          end
+          if not zigbeeGroups[friendly] then
+            if logging and zigbeeDevices[zigbeeName[friendly]].available ~= avail then log('Device '..friendly..(avail and ' is available' or ' is NOT available')) end
+            zigbeeDevices[zigbeeName[friendly]].available = avail
+          else
+            if logging and zigbeeGroups[friendly].available ~= avail then log('Group '..friendly..(avail and ' is available' or ' is NOT available')) end
+            zigbeeGroups[friendly].available = avail
+          end
         end
       elseif parts[#parts] == 'set' then -- Do nothing
       elseif parts[#parts] == 'get' then -- Do nothing
