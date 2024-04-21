@@ -17,6 +17,7 @@ local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, qu
 local logExposedSummary = true -- The exposed properties are logged when devices are discovered or updated
 
 local logging = true
+local logSensors = true
 
 local busTimeout = 0.1
 local mqttTimeout = 0
@@ -41,6 +42,8 @@ local cbusMessages = {}     -- Message queue, inbound from C-Bus, contains an ar
 local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains an array of { topic, payload }
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops, dict of { time }
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
+local ramping = {}          -- Key is alias, set to true when a group is ramping
+local suppressBuffer = 2.0  -- Additional seconds of suppression beyond expected end of ramp
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
 local suppressCbusUpdates = {} -- Suppress status updates to MQTT during transitions, key is alias, dict of { target, time }
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
@@ -126,11 +129,10 @@ local function eventCallback(event)
     value = tonumber(string.sub(event.datahex,1,2),16)
     zigbee[event.dst].value = value
     local target = tonumber(string.sub(event.datahex,3,4),16)
-    if event.meta == 'admin' or event.sender ~= 'cb' then -- A ramp always begins with an admin or non-C-Bus message, so queue a transition, but only if ramping (other simple non-ramp messages are seen as admin as well)
-      if ramp > 0 then
-        cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
-        return
-      end
+    if ramp > 0 and not ramping[event.dst] then
+      cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=target, origin=origin, ramp=ramp, } -- Queue the event
+      ramping[event.dst] = true
+      return
     end
     if ramp > 0 and value ~= target then return end -- Ignore intermediate level changes during a ramp
   else
@@ -497,6 +499,7 @@ local function publish(alias, level, origin, ramp)
   end
   if clearMqttSuppress[alias] then
     suppressMqttUpdates[alias] = nil
+    ramping[alias] = nil
     clearMqttSuppress[alias] = nil
     if logging then log('Clear suppressMqttUpdates for '..alias) end
     return true
@@ -520,12 +523,12 @@ local function publish(alias, level, origin, ramp)
     end
     if ramp > 0 then
       duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
-      suppressMqttUpdates[alias] = { time=socket.gettime() + duration + 1, target=level, } -- Expected completion time with a small buffer
+      suppressMqttUpdates[alias] = { time=socket.gettime() + duration + suppressBuffer, target=level, } -- Expected completion time with a small buffer
       if logging then log('Set suppressMqttUpdates for '..alias) end
       if zigbee[alias].class == 'group' then
         for _, m in ipairs(zigbee[alias].members) do
           duration = math.abs(level - zigbee[m].value) / 256 * ramp -- Duration for group members is calculated from the member current levels
-          suppressMqttUpdates[m] = { time=socket.gettime() + duration + 1, target=level, } -- Expected completion time with a small buffer
+          suppressMqttUpdates[m] = { time=socket.gettime() + duration + suppressBuffer, target=level, } -- Expected completion time with a small buffer
           suppressCbusUpdates[m] = suppressMqttUpdates[m]
           if logging then log('Set suppressMqttUpdates for '..m) end
           if logging then log('Ramp group member '..m..' from '..zigbee[m].value..' to '..level..', rate '..ramp..'='..duration..' seconds') end
@@ -702,7 +705,7 @@ local function statusUpdate(alias, friendly, payload)
       if z.type == 'boolean' then value = value and 1 or 0 end
       if value then
         if string.format('%.5f', grp.getvalue(z.alias)) ~= string.format('%.5f', value) then
-          if logging then log('Set '..z.alias..', '..z.expose..'='..value) end
+          if logging and logSensors then log('Set '..z.alias..', '..z.expose..'='..value) end
           if z.app == 228 then -- Special case for measurement app
             SetCBusMeasurement(z.net, z.group, z.channel, value, cbusMeasurementUnits[z.expose] or 0)
           else
@@ -795,6 +798,7 @@ local function expireOrphans()
     if socket.gettime() > finish.time then
       suppressMqttUpdates[alias] = nil if logging then log('Expired suppressMqttUpdates for '..alias) end
       clearMqttSuppress[alias] = nil
+      ramping[alias] = nil
       ignoreMqtt[alias] = { time=socket.gettime(), }
       grp.write(alias, finish.target)
     end
