@@ -22,7 +22,7 @@ Lighting group, measurement app and user parameters are implemented.
 
 2. **Configure Zigbee2MQTT**: Ensure that Zigbee2MQTT is configured correctly.
 
-3. **Update Configuration**: Modify the Lua scripts to include the Mosquitto broker details and any other configuration specific to your setup.
+3. **Update Configuration**: Modify the Lua scripts to include the MQTT broker details and any other configuration specific to your setup.
 
 4. **Configure Automation Controller keywords**: Tag C-Bus devices with the "ZIGBEE" keyword and other keywords as described below.
 
