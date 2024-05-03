@@ -16,8 +16,8 @@ local lighting = { ['56'] = true, } -- Array of applications that are used for l
 local keepMessagesForOfflineQueued = true -- When a Zigbee device is offline, queue outstanding C-Bus to zigbee messages
 local logExposedSummary = true -- The exposed properties are logged when devices are discovered or updated
 
-local logging = true
-local logSensors = true
+local logging = false
+local logSensors = false
 
 local busTimeout = 0.1
 local mqttTimeout = 0
@@ -43,7 +43,7 @@ local mqttMessages = {}     -- Message queue, inbound from Mosquitto, contains a
 local ignoreMqtt = {}       -- When sending from C-Bus to MQTT any status update for C-Bus will be ignored, avoids message loops, dict of { time }
 local ignoreCbus = {}       -- When receiving from MQTT to C-Bus any status update for MQTT will be ignored, avoids message loops, dict of { expecting, time }
 local ramping = {}          -- Key is alias, set to true when a group is ramping
-local suppressBuffer = 2.0  -- Additional seconds of suppression beyond expected end of ramp
+local suppressBuffer = 2.0  -- Additional seconds of suppression beyond expected end of ramp, positive status detection will clear suppression early
 local suppressMqttUpdates = {} -- Suppress status updates to C-Bus during transitions, key is alias, dict of { target, time }
 local suppressCbusUpdates = {} -- Suppress status updates to MQTT during transitions, key is alias, dict of { target, time }
 local clearMqttSuppress = {} -- At the end of a ramp indicate that suppression should be cleared
@@ -55,7 +55,7 @@ local cudRaw = { -- All possible keywords for ZIGBEE objects. cudAll is used in 
 }
 local cudAll = {} local param for _, param in ipairs(cudRaw) do cudAll[param] = true end cudRaw = nil
 
--- Runtime global variable checking. Globals must be explicitly declared, which will catch variable name typos
+-- Runtime global variable checking. Globals must be explicitly declared, so this will catch many variable name typos. Table member name issues will not be caught.
 local declaredNames = { vprint = true, vprinthex = true, maxgroup = true, mosquitto = true, rr = true, _ = true, }
 local function declare(name, initval) rawset(_G, name, initval) declaredNames[name] = true end
 local exclude = { ngx = true, }
@@ -795,7 +795,7 @@ local function expireOrphans()
   local status, finish
   for alias, finish in pairs(suppressMqttUpdates) do
     if socket.gettime() > finish.time then
-      suppressMqttUpdates[alias] = nil if logging then log('Expired suppressMqttUpdates for '..alias) end
+      suppressMqttUpdates[alias] = nil log('Expired suppressMqttUpdates for '..alias)
       clearMqttSuppress[alias] = nil
       ramping[alias] = nil
       ignoreMqtt[alias] = { time=socket.gettime(), }
@@ -804,12 +804,12 @@ local function expireOrphans()
   end
   for alias, finish in pairs(suppressCbusUpdates) do
     if socket.gettime() > finish.time then
-      suppressCbusUpdates[alias] = nil if logging then log('Expired suppressCbusUpdates for '..alias) end
+      suppressCbusUpdates[alias] = nil log('Expired suppressCbusUpdates for '..alias)
     end
   end
   for alias, ignore in pairs(ignoreCbus) do
     if socket.gettime() - ignore.time > ignoreTimeout then
-      if logging then log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..tostring(ignoreCbus[alias].expecting)..' was never received - value when set was '..tostring(ignoreCbus[alias].was)) end
+      log('Warning: Removed orphaned C-Bus ignore flag for '..alias..', the expected level '..tostring(ignoreCbus[alias].expecting)..' was never received - value when set was '..tostring(ignoreCbus[alias].was))
       ignoreCbus[alias] = nil
     end
   end
