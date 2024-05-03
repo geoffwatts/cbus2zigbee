@@ -123,10 +123,11 @@ local function eventCallback(event)
   if not zigbee[event.dst] then return end
   local value
   local origin = zigbee[event.dst].value
-  local ramp = tonumber(string.sub(event.datahex,7,8),16)
+  local ramp = 0
   local parts = string.split(event.dst, '/')
   if lighting[parts[2]] then
     value = tonumber(string.sub(event.datahex,1,2),16)
+    ramp = tonumber(string.sub(event.datahex,7,8),16)
     zigbee[event.dst].value = value
     local target = tonumber(string.sub(event.datahex,3,4),16)
     if ramp > 0 and not ramping[event.dst] then
@@ -143,8 +144,6 @@ local function eventCallback(event)
   cbusMessages[#cbusMessages + 1] = { alias=event.dst, level=value, origin=origin, ramp=0, } -- Queue the event
   if ramp > 0 then  -- Request clear suppression because at final level, suppression is actually cleared after the final level has been processed
     clearMqttSuppress[event.dst] = true
-    -- Also clear group member suppression if they exist
-    if zigbee[event.dst].members ~= nil then local m for _, m in ipairs(zigbee[event.dst].members) do clearMqttSuppress[m] = true end end
   end
 end
 
@@ -497,13 +496,6 @@ local function publish(alias, level, origin, ramp)
   if zigbee[alias].class ~= 'group' then
     if not zigbeeDevices[zigbee[alias].address].available or not bridgeOnline then if keepMessagesForOfflineQueued then return 'retain' else return false end end -- Device or bridge is currently unavailable, so keep queued if keepMessagesForOfflineQueued is true
   end
-  if clearMqttSuppress[alias] then
-    suppressMqttUpdates[alias] = nil
-    ramping[alias] = nil
-    clearMqttSuppress[alias] = nil
-    if logging then log('Clear suppressMqttUpdates for '..alias) end
-    return true
-  end
 
   local msg
   if zigbee[alias].class == 'switch' then
@@ -511,7 +503,6 @@ local function publish(alias, level, origin, ramp)
       [zigbee[alias].exposed] = (level ~= 0) and 'ON' or 'OFF',
     }
   else
-    local duration
     if zigbee[alias].class ~= 'group' then
       if hasMembers(zigbeeDevices) and zigbeeDevices[zigbee[alias].address] then -- Some zigbee devices have a max brightness of less than 255
         local max = zigbeeDevices[zigbee[alias].address].max
@@ -521,8 +512,8 @@ local function publish(alias, level, origin, ramp)
       local max = zigbeeGroups[zigbee[alias].friendly].max
       if max ~= nil then if level > max then level = max end end
     end
-    if ramp > 0 then
-      duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
+    local duration = math.abs(level - origin) / 256 * ramp -- Translate ramp rate to transition time
+    if duration > 0 then
       suppressMqttUpdates[alias] = { time=socket.gettime() + duration + suppressBuffer, target=level, } -- Expected completion time with a small buffer
       if logging then log('Set suppressMqttUpdates for '..alias) end
       if zigbee[alias].class == 'group' then
@@ -567,6 +558,14 @@ Receive commands from C-Bus and publish to MQTT
 local function outstandingCbusMessage()
   local keep = {}
   for _, cmd in ipairs(cbusMessages) do
+    if clearMqttSuppress[cmd.alias] then
+      suppressMqttUpdates[cmd.alias] = nil
+      suppressCbusUpdates[cmd.alias] = nil
+      ramping[cmd.alias] = nil
+      clearMqttSuppress[cmd.alias] = nil
+      if logging then log('Clear suppressMqttUpdates for '..cmd.alias) end
+      goto next
+    end
     if suppressCbusUpdates[cmd.alias] then goto next end
     if ignoreCbus[cmd.alias] ~= nil and cmd.level == ignoreCbus[cmd.alias].expecting then ignoreCbus[cmd.alias] = nil goto next end
     if publish(cmd.alias, cmd.level, cmd.origin, cmd.ramp) == 'retain' then keep[#keep+1] = cmd end -- Device unavailable, so keep trying
@@ -676,14 +675,14 @@ end
 A device has updated status, so send to C-Bus
 --]]
 local function statusUpdate(alias, friendly, payload)
-  if ignoreMqtt[alias] or suppressMqttUpdates[alias] then return end
-  ignoreMqtt[alias] = nil
+  if ignoreMqtt[alias] or suppressMqttUpdates[alias] then ignoreMqtt[alias] = nil return end
+  if zigbee[alias].class == 'group' then
+    -- Don't do much. Group objects in C-Bus do not get updated (yet?)...
+    return
+  end
   local device if hasMembers(zigbeeDevices) then device = zigbeeDevices[zigbeeName[friendly]] else return end
   if not device then return end
-  if zigbee[alias].class == 'group' then
-    -- Do nothing. Group objects in C-Bus do not get updated (yet?)...
-    device = zigbeeGroups[friendly]
-  elseif zigbee[alias].class == 'switch' then
+  if zigbee[alias].class == 'switch' then
     local z
     for _, z in ipairs(device.exposed) do
       local value = payload[z.expose]
