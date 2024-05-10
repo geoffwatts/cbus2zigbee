@@ -137,7 +137,40 @@ local function eventCallback(event)
     end
     if ramp > 0 and value ~= target then return end -- Ignore intermediate level changes during a ramp
   else
-    value = grp.getvalue(event.dst)
+    local function hex2float(raw)
+      if tonumber(raw, 16) == 0 then return 0.0 end
+      local raw = string.gsub(raw, "(..)", function (x) return string.char(tonumber(x, 16)) end)
+      local byte1, byte2, byte3, byte4 = string.byte(raw, 1, 4)
+      local sign = byte1 > 0x7F
+      local exponent = (byte1 % 0x80) * 0x02 + math.floor(byte2 / 0x80)
+      local mantissa = ((byte2 % 0x80) * 0x100 + byte3) * 0x100 + byte4
+      if sign then sign = -1 else sign = 1 end
+      local n if mantissa == 0 and exponent == 0 then n = sign * 0.0 elseif exponent == 0xFF then if mantissa == 0 then n = sign * math.huge else n = 0.0/0.0 end else n = sign * math.ldexp(1.0 + mantissa / 0x800000, exponent - 0x7F) end
+      return n
+    end
+
+    local convert = {
+      [dt.text]    = function () return(string.gsub(event.datahex, "(..)", function (x) return string.char(tonumber(x, 16)) end)) end, -- Convert string of hex to string of chars
+      [dt.string]  = function () return(string.gsub(event.datahex, "(..)", function (x) return string.char(tonumber(x, 16)) end)) end,
+      [dt.uint32]  = function () return(tonumber(event.datahex, 16)) end,
+      [dt.uint16]  = function () return(tonumber(event.datahex, 16)) end,
+      [dt.uint8]   = function () return(tonumber(event.datahex, 16)) end,
+      [dt.int64]   = function () return((tonumber(event.datahex, 16) + 2^63) % 2^64 - 2^63) end, -- Convert to twos compliment signed
+      [dt.int32]   = function () return((tonumber(event.datahex, 16) + 2^31) % 2^32 - 2^31) end,
+      [dt.int16]   = function () return((tonumber(event.datahex, 16) + 2^15) % 2^16 - 2^15) end,
+      [dt.int8]    = function () return((tonumber(event.datahex, 16) + 2^7) % 2^8 - 2^7) end,
+      [dt.bool]    = function () return(tonumber(event.datahex, 16) == 1) end,
+      [dt.float32] = function () return(hex2float(string.sub(event.datahex, 1, 8))) end, -- Only the first eight characters of datahex are needed (measurement and user parameter add additional data)
+      -- If LUA >= 5.3, would not need hex2float()... Instead return(string.unpack('f', string.pack('i4', '0x'..string.sub(event.datahex, 1, 8))))
+      -- To consider, currently unsupported... dt.time, dt.date, dt.rgb/dt.uint24, dt.float16
+    }
+    local tp = grp.find(event.dst).datatype
+    if convert[tp] ~= nil then
+      value = convert[tp]()
+    else
+      log('Error: Unsupported data type '..dt..' for '..event.dst..', content of datahex '..event.datahex..' not setting')
+      return
+    end
     zigbee[event.dst].value = value
   end
   if value == origin and zigbee[event.dst].class ~= 'group' then return end -- Don't publish if already at the level (unless a Zigbee group)
